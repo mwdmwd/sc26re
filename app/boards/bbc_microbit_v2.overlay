@@ -1,0 +1,23 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+
+#include <zephyr/dt-bindings/pwm/pwm.h>
+
+/ {
+	aliases {
+		/delete-property/ sw0;
+		/delete-property/ sw1;
+
+		button-a = &buttonA;
+		button-b = &buttonB;
+		haptic0 = &speaker_haptic;
+	};
+
+	haptics {
+		compatible = "pwm-leds";
+
+		speaker_haptic: haptic_0 {
+			pwms = <&pwm1 0 PWM_HZ(2000) PWM_POLARITY_INVERTED>;
+			label = "micro:bit speaker haptic";
+		};
+	};
+};

@@ -1,0 +1,193 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+ifeq ($(SC26RE_MAIN_INCLUDED),)
+.DEFAULT_GOAL := ida-pat
+endif
+
+EXTRA_HELP += \
+	'' \
+	'make -f Makefile.ida ida-pat       build final collision-filtered IDA PAT and FLIRT SIG' \
+	'make -f Makefile.ida ida-sig       build final IDA FLIRT SIG and collision-filtered PAT' \
+	'make -f Makefile.ida ida-flirt     alias for ida-pat' \
+	'IDA final SIG: corpus/ida/steamctl-ncs.sig' \
+	'IDA final PAT: corpus/ida/steamctl-ncs.pat' \
+	'IDA raw PAT:   corpus/ida/steamctl-ncs.unfiltered.pat, normalized but still contains collision rows' \
+	'IDA report:    corpus/ida/steamctl-ncs-collisions.md'
+
+CORPUS_DIR ?= $(CURDIR)/corpus
+IDA_DIR ?= /opt/ida-pro
+IDA_FLAIR_DIR ?= $(IDA_DIR)/tools/flair
+IDA_OUT_DIR ?= $(CORPUS_DIR)/ida
+IDA_IGNORED_SYMBOLS ?= $(CURDIR)/scripts/fid-ignored-symbols.txt
+IDA_PELF_OPTIONS ?= $(IDA_OUT_DIR)/pelf-ignore-symbols.opts
+IDA_ARCHIVE_PAT ?= $(IDA_OUT_DIR)/steamctl-ncs-archives.pat
+IDA_PROGRAM_PAT ?= $(IDA_OUT_DIR)/steamctl-ncs-programs.pat
+IDA_UNFILTERED_PAT ?= $(IDA_OUT_DIR)/steamctl-ncs.unfiltered.pat
+IDA_PAT ?= $(IDA_OUT_DIR)/steamctl-ncs.pat
+IDA_SIG ?= $(IDA_OUT_DIR)/steamctl-ncs.sig
+IDA_EXC ?= $(IDA_OUT_DIR)/steamctl-ncs.exc
+IDA_RAW_EXC ?= $(IDA_OUT_DIR)/steamctl-ncs.raw.exc
+IDA_IDALIB_WORK_DIR ?= $(IDA_OUT_DIR)/idalib-work
+IDA_IDAUSR_DIR ?= $(IDA_OUT_DIR)/idausr
+IDA_USER_DIR ?= $(HOME)/.idapro
+IDA_AUTO_EXCLUDE_COLLISIONS ?= 1
+IDA_PELF ?= $(IDA_FLAIR_DIR)/pelf
+IDA_SIGMAKE ?= $(IDA_FLAIR_DIR)/sigmake
+PYTHON ?= python3
+
+ifeq ($(SC26RE_MAIN_INCLUDED),)
+.PHONY: corpus corpus-refresh
+corpus:
+	$(MAKE) -f Makefile corpus
+
+corpus-refresh:
+	$(MAKE) -f Makefile corpus-refresh
+endif
+
+.PHONY: ida-flirt
+ida-flirt: ida-pat
+
+.PHONY: ida-pat
+ida-pat: $(IDA_PAT)
+
+.PHONY: ida-sig
+ida-sig: $(IDA_SIG)
+
+$(IDA_PELF_OPTIONS): $(IDA_IGNORED_SYMBOLS)
+	mkdir -p "$(dir $@)"
+	@awk '\
+		function escape_regex(s, out, i, ch) { \
+			out = ""; \
+			for (i = 1; i <= length(s); i++) { \
+				ch = substr(s, i, 1); \
+				if (ch ~ /[][\\.^$$()+{}|]/) { \
+					out = out "\\" ch; \
+				} \
+				else { \
+					out = out ch; \
+				} \
+			} \
+			return out; \
+		} \
+		function glob_to_regex(s, out, i, ch) { \
+			out = "^"; \
+			for (i = 1; i <= length(s); i++) { \
+				ch = substr(s, i, 1); \
+				if (ch == "*") { \
+					out = out ".*"; \
+				} \
+				else if (ch == "?") { \
+					out = out "."; \
+				} \
+				else { \
+					out = out escape_regex(ch); \
+				} \
+			} \
+			return out "\044"; \
+		} \
+		{ \
+			line = $$0; \
+			sub(/^[[:space:]]+/, "", line); \
+			sub(/[[:space:]]+$$/, "", line); \
+			if (line == "" || substr(line, 1, 1) == "#") { \
+				next; \
+			} \
+			if (line ~ /^\/.*\/$$/) { \
+				regex = substr(line, 2, length(line) - 2); \
+			} \
+			else if (line ~ /[*?]/) { \
+				regex = glob_to_regex(line); \
+			} \
+			else { \
+				regex = "^" escape_regex(line) "\044"; \
+			} \
+			print "-X" regex; \
+		}' "$<" > "$@.tmp"
+	mv "$@.tmp" "$@"
+
+$(IDA_ARCHIVE_PAT): corpus $(IDA_PELF) $(IDA_PELF_OPTIONS)
+	mkdir -p "$(IDA_OUT_DIR)" "$(CORPUS_DIR)/reports"
+	@set -eu; \
+	tmp="$(IDA_ARCHIVE_PAT).$$$$.tmp"; \
+	rm -f "$$tmp"; \
+	trap 'rm -f "$$tmp"' EXIT; \
+	inputs=$$(find "$(CORPUS_DIR)/static-libs" -type f -name '*.a' -print | sort); \
+	if [ -z "$$inputs" ]; then \
+		echo "no IDA corpus archives found under $(CORPUS_DIR)/static-libs" >&2; \
+		exit 1; \
+	fi; \
+	first=1; \
+	printf '%s\n' "$$inputs" | while IFS= read -r input; do \
+		if [ "$$first" -eq 1 ]; then \
+			"$(IDA_PELF)" @"$(IDA_PELF_OPTIONS)" "$$input" "$$tmp"; \
+			first=0; \
+		else \
+			"$(IDA_PELF)" @"$(IDA_PELF_OPTIONS)" -a "$$input" "$$tmp"; \
+		fi; \
+	done; \
+	mv "$$tmp" "$(IDA_ARCHIVE_PAT)"; \
+	trap - EXIT; \
+	printf 'wrote %s\n' "$(IDA_ARCHIVE_PAT)"
+
+$(IDA_PROGRAM_PAT): corpus $(IDA_IGNORED_SYMBOLS) scripts/build-ida-program-patterns.py
+	mkdir -p "$(IDA_OUT_DIR)" "$(CORPUS_DIR)/reports"
+	$(PYTHON) scripts/build-ida-program-patterns.py \
+		--program-dir "$(CORPUS_DIR)/fid-programs" \
+		--out "$(IDA_PROGRAM_PAT)" \
+		--work-dir "$(IDA_IDALIB_WORK_DIR)" \
+		--ignored-symbols "$(IDA_IGNORED_SYMBOLS)" \
+		--idausr-source "$(IDA_USER_DIR)" \
+		--idausr "$(IDA_IDAUSR_DIR)" \
+		--idadir "$(IDA_DIR)"
+
+$(IDA_UNFILTERED_PAT): $(IDA_ARCHIVE_PAT) $(IDA_PROGRAM_PAT) scripts/process-ida-patterns.py
+	$(PYTHON) scripts/process-ida-patterns.py normalize \
+		--out "$@" \
+		"$(IDA_ARCHIVE_PAT)" \
+		"$(IDA_PROGRAM_PAT)"
+
+$(IDA_PAT) $(IDA_SIG): $(IDA_UNFILTERED_PAT) $(IDA_SIGMAKE) scripts/process-ida-patterns.py
+	mkdir -p "$(IDA_OUT_DIR)"
+	@set -eu; \
+	rm -f "$(IDA_SIG)" "$(IDA_EXC)" "$(IDA_RAW_EXC)" "$(IDA_PAT)" "$(IDA_OUT_DIR)"/steamctl-ncs.filtered.pat "$(IDA_OUT_DIR)"/steamctl-ncs.filtered.*.pat; \
+	if "$(IDA_SIGMAKE)" -x"$(IDA_EXC)" "$(IDA_UNFILTERED_PAT)" "$(IDA_SIG)"; then \
+		cp "$(IDA_UNFILTERED_PAT)" "$(IDA_PAT)"; \
+		printf 'final IDA SIG: %s\n' "$(IDA_SIG)"; \
+		printf 'final IDA PAT: %s\n' "$(IDA_PAT)"; \
+		exit 0; \
+	fi; \
+	if [ "$(IDA_AUTO_EXCLUDE_COLLISIONS)" != 1 ]; then \
+		exit 1; \
+	fi; \
+	if [ ! -f "$(IDA_EXC)" ]; then \
+		echo "sigmake failed without writing $(IDA_EXC)" >&2; \
+		exit 1; \
+	fi; \
+	cp "$(IDA_EXC)" "$(IDA_RAW_EXC)"; \
+	current_pat="$(IDA_UNFILTERED_PAT)"; \
+	current_exc="$(IDA_RAW_EXC)"; \
+	pass=0; \
+	while [ "$$pass" -lt 8 ]; do \
+		next_pat="$(IDA_OUT_DIR)/steamctl-ncs.filtered.$$pass.pat"; \
+		$(PYTHON) scripts/process-ida-patterns.py filter-pat \
+			--pat "$$current_pat" \
+			--exc "$$current_exc" \
+			--out "$$next_pat" \
+			--mode keep-duplicate-names; \
+		rm -f "$(IDA_SIG)" "$(IDA_EXC)"; \
+		if "$(IDA_SIGMAKE)" -x"$(IDA_EXC)" "$$next_pat" "$(IDA_SIG)"; then \
+			cp "$$next_pat" "$(IDA_PAT)"; \
+			rm -f "$(IDA_OUT_DIR)"/steamctl-ncs.filtered.*.pat; \
+			printf 'final IDA SIG: %s\n' "$(IDA_SIG)"; \
+			printf 'final IDA PAT: %s\n' "$(IDA_PAT)"; \
+			exit 0; \
+		fi; \
+		if [ ! -f "$(IDA_EXC)" ]; then \
+			echo "sigmake failed without writing $(IDA_EXC)" >&2; \
+			exit 1; \
+		fi; \
+		current_pat="$$next_pat"; \
+		current_exc="$(IDA_EXC)"; \
+		pass=$$((pass + 1)); \
+	done; \
+	echo "sigmake still reports collisions after $$pass filtering passes" >&2; \
+	exit 1

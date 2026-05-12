@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+identifier: steam_controller_ibex/nrf52833
+name: Steam Controller Ibex nRF52833
+type: mcu
+arch: arm
+ram: 128
+flash: 512
+toolchain:
+  - gnuarmemb
+  - zephyr
+supported:
+  - adc
+  - ble
+  - gpio
+  - i2c
+  - i2s
+  - pwm
+  - sensor
+  - usb_device
+  - watchdog

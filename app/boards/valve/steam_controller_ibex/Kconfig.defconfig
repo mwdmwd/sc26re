@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+if BOARD_STEAM_CONTROLLER_IBEX
+
+config BT_CTLR
+	default BT
+
+endif

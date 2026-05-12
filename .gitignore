@@ -1,0 +1,10 @@
+*.fw
+*.bin
+__pycache__/
+.gdb_history
+/hardwareupdater*
+/steam-fetch/
+/corpus/
+/dumps/
+/ghidra/
+/sdk/

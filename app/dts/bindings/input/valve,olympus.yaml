@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+description: Valve Olympus dual touch controller
+
+compatible: "valve,olympus"
+
+include: i2c-device.yaml
+
+properties:
+  int-gpios:
+    type: phandle-array
+    required: true
+    description: Olympus data-ready interrupt.
+
+  reset-gpios:
+    type: phandle-array
+    required: true
+    description: Olympus reset output.

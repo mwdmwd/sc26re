@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+BasedOnStyle: LLVM
+
+# Tabs are indentation. Spaces are alignment. In clang-format, that is
+# ForIndentation. ForContinuationAndIndentation would tab-align wrapped lines.
+UseTab: ForIndentation
+IndentWidth: 4
+TabWidth: 4
+
+# Treat braced initializer bodies like block indentation so their leading
+# indent can be tabs; the LLVM default treats them as continuation alignment.
+Cpp11BracedListStyle: false
+
+BreakBeforeBraces: Allman
+# AfterExternBlock: true
+BreakBinaryOperations: RespectPrecedence
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+BreakTemplateDeclarations: Yes
+IndentCaseLabels: true
+AccessModifierOffset: -4
+SpaceBeforeParens: Never
+SpaceAfterTemplateKeyword: false
+FixNamespaceComments: false
+SkipMacroDefinitionBody: true
+ColumnLimit: 100

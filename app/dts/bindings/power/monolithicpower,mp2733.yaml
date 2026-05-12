@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+description: Monolithic Power Systems MP2733 charger/fuel-gauge interface
+
+compatible: "monolithicpower,mp2733"
+
+include: i2c-device.yaml

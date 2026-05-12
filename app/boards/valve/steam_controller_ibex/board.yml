@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+board:
+  name: steam_controller_ibex
+  full_name: Steam Controller Ibex
+  vendor: valve
+  socs:
+  - name: nrf52833

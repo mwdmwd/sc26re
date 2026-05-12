@@ -1,0 +1,109 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+ifeq ($(SC26RE_MAIN_INCLUDED),)
+.DEFAULT_GOAL := firmware
+endif
+
+CLIENT_UPDATE_URL ?= https://client-update.akamai.steamstatic.com
+CLIENT_MANIFEST ?= steam_client_ubuntu12
+CLIENT_MANIFEST_FILE ?= $(CURDIR)/manifests/$(CLIENT_MANIFEST).manifest
+CLIENT_HARDWARE_PACKAGES := bins_hardware_all bins_hardware_ubuntu12
+STEAM_ROOT ?= $(HOME)/.local/share/Steam
+STEAM_FETCH_DIR ?= $(CURDIR)/steam-fetch
+
+FIRMWARES := \
+	IBEX_FW_69FA5889.fw \
+	IBEX_FW_69FE17FF.fw \
+	PROTEUS_FW_69FA587F.fw \
+	PROTEUS_FW_69FBD45D.fw
+
+UPDATER_FILES := hardwareupdater.cfg hardwareupdater.x86_64
+SEARCH_DIRS := \
+	$(STEAM_FETCH_DIR)/bin/hardwareupdater \
+	hardwareupdater \
+	$(STEAM_ROOT)/bin/hardwareupdater \
+	$(STEAM_FETCH_DIR)
+
+.PHONY: firmware
+firmware: fetch-firmware verify-firmware
+
+.PHONY: updater
+updater: fetch-updater
+
+.PHONY: fetch-firmware
+fetch-firmware: fetch-steam-client copy-firmware
+
+.PHONY: fetch-updater
+fetch-updater: fetch-steam-client copy-updater
+
+# Steam Controller firmware is currently shipped in the Steam client update
+# packages under bin/hardwareupdater. Steam Client itself is app 7, but it is a
+# config app and does not install with app_update/download_depot like a normal
+# tool, so fetch the package archives named by a pinned Steam client manifest.
+.PHONY: fetch-steam-client
+fetch-steam-client:
+	@set -eu; \
+	mkdir -p "$(STEAM_FETCH_DIR)"; \
+	if [ ! -f "$(CLIENT_MANIFEST_FILE)" ]; then \
+		echo "missing pinned Steam client manifest: $(CLIENT_MANIFEST_FILE)" >&2; \
+		echo "run: make refresh-steam-client-manifest" >&2; \
+		exit 1; \
+	fi; \
+	./scripts/steam-client-manifest.py "$(CLIENT_MANIFEST_FILE)" $(CLIENT_HARDWARE_PACKAGES) | \
+	while read -r pkg archive expected_sha; do \
+		if [ -z "$$pkg" ] || [ -z "$$archive" ] || [ -z "$$expected_sha" ]; then \
+			echo "missing package $$pkg in $(CLIENT_MANIFEST_FILE)" >&2; \
+			exit 1; \
+		fi; \
+		out="$(STEAM_FETCH_DIR)/$$archive"; \
+		curl -fsSL "$(CLIENT_UPDATE_URL)/$$archive" -o "$$out"; \
+		printf '%s  %s\n' "$$expected_sha" "$$out" | sha256sum -c -; \
+		unzip -oq "$$out" 'bin/hardwareupdater/*' -d "$(STEAM_FETCH_DIR)"; \
+		echo "$$pkg <- $$archive"; \
+	done
+
+.PHONY: refresh-steam-client-manifest
+refresh-steam-client-manifest:
+	mkdir -p "$(dir $(CLIENT_MANIFEST_FILE))"
+	curl -fsSL "$(CLIENT_UPDATE_URL)/$(CLIENT_MANIFEST)" -o "$(CLIENT_MANIFEST_FILE)"
+
+.PHONY: copy-firmware
+copy-firmware:
+	@set -eu; \
+	for f in $(FIRMWARES); do \
+		src=$$(find -L $(SEARCH_DIRS) -type f -name "$$f" -print -quit 2>/dev/null || true); \
+		if [ -z "$$src" ]; then \
+			echo "missing $$f; looked in: $(SEARCH_DIRS)" >&2; \
+			exit 1; \
+		fi; \
+		if [ "$$src" = "./$$f" ] || [ "$$src" = "$$PWD/$$f" ]; then \
+			:; \
+		else \
+			cp -f "$$src" "$$f"; \
+		fi; \
+		echo "$$f <- $$src"; \
+	done
+
+.PHONY: copy-updater
+copy-updater:
+	@set -eu; \
+	for f in $(UPDATER_FILES); do \
+		src=$$(find -L $(SEARCH_DIRS) -type f -name "$$f" -print -quit 2>/dev/null || true); \
+		if [ -z "$$src" ]; then \
+			echo "missing $$f; looked in: $(SEARCH_DIRS)" >&2; \
+			exit 1; \
+		fi; \
+		if [ "$$src" = "./$$f" ] || [ "$$src" = "$$PWD/$$f" ]; then \
+			:; \
+		else \
+			cp -f "$$src" "$$f"; \
+		fi; \
+		echo "$$f <- $$src"; \
+	done
+
+.PHONY: verify-firmware
+verify-firmware:
+	sha256sum -c sums.sha256
+
+.PHONY: clean-firmware
+clean-firmware:
+	rm -f $(FIRMWARES)

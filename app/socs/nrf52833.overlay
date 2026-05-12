@@ -1,0 +1,9 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+
+/*
+ * Keep the Valve bootloader's retained-RAM ISP mailbox out of normal Zephyr
+ * allocations.
+ */
+&sram0 {
+	reg = <0x20000000 0x0001fff0>;
+};

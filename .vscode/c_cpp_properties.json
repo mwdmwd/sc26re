@@ -1,0 +1,18 @@
+{
+    "configurations": [
+        {
+            "name": "Zephyr",
+            "includePath": [
+                "${workspaceFolder}/**"
+            ],
+            "forcedInclude": [
+                "${workspaceFolder}/zephyr/build-app-ibex/app/zephyr/include/generated/zephyr/autoconf.h"
+            ],
+            "defines": [],
+            "compileCommands": [
+                "${workspaceFolder}/zephyr/build-app-ibex/app/compile_commands.json"
+            ]
+        }
+    ],
+    "version": 4
+}

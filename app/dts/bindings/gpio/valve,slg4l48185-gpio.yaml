@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+description: Valve SLG4L48185 input GPIO controller
+
+compatible: "valve,slg4l48185-gpio"
+
+include: [i2c-device.yaml, gpio-controller.yaml]
+
+properties:
+  int-gpios:
+    type: phandle-array
+    description: Optional host interrupt line; either edge schedules an input refresh.
+
+  input-selector:
+    type: int
+    required: true
+    description: |
+      Byte written before reading the two-byte GPIO port value. The exact
+      GreenPAK register semantics are not documented.
+
+  poll-interval-ms:
+    type: int
+    default: 20
+    description: Input polling fallback interval in milliseconds.
+
+  "#gpio-cells":
+    const: 2
+
+gpio-cells:
+  - pin
+  - flags

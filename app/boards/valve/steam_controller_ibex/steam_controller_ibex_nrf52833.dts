@@ -1,0 +1,383 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+
+/dts-v1/;
+
+#include <nordic/nrf52833_qiaa.dtsi>
+#include "steam_controller_ibex_nrf52833-pinctrl.dtsi"
+#include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/adc/nrf-saadc.h>
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
+
+/ {
+	model = "Steam Controller Ibex";
+	compatible = "valve,steam-controller-ibex";
+
+	aliases {
+		button-a = &button_a;
+		button-b = &button_b;
+		button-x = &button_x;
+		button-y = &button_y;
+		button-qam = &button_qam;
+		button-right-stick = &button_right_stick;
+		button-view = &button_menu;
+		button-right-paddle1 = &button_right_paddle1;
+		button-right-paddle2 = &button_right_paddle2;
+		button-right-shoulder = &button_right_shoulder;
+		button-dpad-down = &button_dpad_down;
+		button-dpad-right = &button_dpad_right;
+		button-dpad-left = &button_dpad_left;
+		button-dpad-up = &button_dpad_up;
+		button-menu = &button_left_view;
+		button-left-stick = &button_left_stick;
+		button-steam = &button_steam;
+		button-left-paddle1 = &button_left_paddle1;
+		button-left-paddle2 = &button_left_paddle2;
+		button-left-shoulder = &button_left_shoulder;
+		accel0 = &imu;
+		watchdog0 = &wdt0;
+	};
+
+	chosen {
+		zephyr,console = &cdc_acm_uart0;
+		zephyr,shell-uart = &cdc_acm_uart0;
+		zephyr,sram = &sram0;
+		zephyr,flash = &flash0;
+		zephyr,code-partition = &application_partition;
+	};
+
+	buttons {
+		compatible = "gpio-keys";
+
+		button_a: button_a {
+			label = "A";
+			gpios = <&gpio0 23 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			zephyr,code = <INPUT_BTN_SOUTH>;
+		};
+
+		button_b: button_b {
+			label = "B";
+			gpios = <&gpio0 10 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			zephyr,code = <INPUT_BTN_EAST>;
+		};
+
+		button_menu: button_menu {
+			label = "Menu";
+			gpios = <&gpio1 4 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			zephyr,code = <INPUT_KEY_MENU>;
+		};
+
+		button_steam: button_steam {
+			label = "Steam";
+			gpios = <&gpio1 6 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			zephyr,code = <INPUT_KEY_HOME>;
+		};
+
+		button_left_view: button_left_view {
+			label = "View";
+			gpios = <&gpio0 12 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			zephyr,code = <INPUT_KEY_BACK>;
+		};
+	};
+
+	greenpak_buttons {
+		compatible = "gpio-keys";
+
+		button_x: button_x {
+			gpios = <&greenpak 11 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_BTN_WEST>;
+		};
+
+		button_y: button_y {
+			gpios = <&greenpak 9 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_BTN_NORTH>;
+		};
+
+		button_qam: button_qam {
+			gpios = <&greenpak 5 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_BTN_MODE>;
+		};
+
+		button_right_stick: button_right_stick {
+			gpios = <&greenpak 15 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_BTN_THUMBR>;
+		};
+
+		button_right_paddle1: button_right_paddle1 {
+			gpios = <&greenpak 13 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_BTN_5>;
+		};
+
+		button_right_paddle2: button_right_paddle2 {
+			gpios = <&greenpak 12 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_BTN_6>;
+		};
+
+		button_right_shoulder: button_right_shoulder {
+			gpios = <&greenpak 14 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_BTN_TR>;
+		};
+
+		button_dpad_down: button_dpad_down {
+			gpios = <&greenpak 2 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_BTN_DPAD_DOWN>;
+		};
+
+		button_dpad_right: button_dpad_right {
+			gpios = <&greenpak 4 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_BTN_DPAD_RIGHT>;
+		};
+
+		button_dpad_left: button_dpad_left {
+			gpios = <&greenpak 3 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_BTN_DPAD_LEFT>;
+		};
+
+		button_dpad_up: button_dpad_up {
+			gpios = <&greenpak 1 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_BTN_DPAD_UP>;
+		};
+
+		button_left_stick: button_left_stick {
+			gpios = <&greenpak 10 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_BTN_THUMBL>;
+		};
+
+		button_left_paddle1: button_left_paddle1 {
+			gpios = <&greenpak 6 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_BTN_7>;
+		};
+
+		button_left_paddle2: button_left_paddle2 {
+			gpios = <&greenpak 7 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_BTN_8>;
+		};
+
+		button_left_shoulder: button_left_shoulder {
+			gpios = <&greenpak 8 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_BTN_TL>;
+		};
+	};
+
+	ibex_analog_inputs {
+		compatible = "valve,ibex-analog-inputs";
+		enable-gpios = <&gpio0 19 GPIO_ACTIVE_HIGH>;
+		io-channels = <&adc 0>, <&adc 1>, <&adc 2>,
+			      <&adc 3>, <&adc 4>, <&adc 5>;
+		io-channel-names = "stick-left-x", "stick-left-y",
+				   "stick-right-x", "stick-right-y",
+				   "trigger-left", "trigger-right";
+	};
+
+	pwmrgbleds: pwmrgbleds {
+		compatible = "pwm-leds";
+
+		led_red: led_red {
+			pwms = <&pwm1 0 PWM_HZ(20000) PWM_POLARITY_INVERTED>;
+			label = "Red LED";
+		};
+
+		led_green: led_green {
+			pwms = <&pwm1 1 PWM_HZ(20000) PWM_POLARITY_INVERTED>;
+			label = "Green LED";
+		};
+
+		led_blue: led_blue {
+			pwms = <&pwm1 2 PWM_HZ(20000) PWM_POLARITY_INVERTED>;
+			label = "Blue LED";
+		};
+
+		led_white: led_white {
+			pwms = <&pwm1 3 PWM_HZ(20000) PWM_POLARITY_INVERTED>;
+			label = "White LED";
+		};
+	};
+};
+
+&adc {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@0 {
+		reg = <0>;
+		zephyr,gain = "ADC_GAIN_1_4";
+		zephyr,reference = "ADC_REF_VDD_1_4";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 3)>;
+		zephyr,input-positive = <NRF_SAADC_AIN4>;
+		zephyr,vref-mv = <825>;
+		zephyr,resolution = <12>;
+	};
+
+	channel@1 {
+		reg = <1>;
+		zephyr,gain = "ADC_GAIN_1_4";
+		zephyr,reference = "ADC_REF_VDD_1_4";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 3)>;
+		zephyr,input-positive = <NRF_SAADC_AIN1>;
+		zephyr,vref-mv = <825>;
+		zephyr,resolution = <12>;
+	};
+
+	channel@2 {
+		reg = <2>;
+		zephyr,gain = "ADC_GAIN_1_4";
+		zephyr,reference = "ADC_REF_VDD_1_4";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 3)>;
+		zephyr,input-positive = <NRF_SAADC_AIN7>;
+		zephyr,vref-mv = <825>;
+		zephyr,resolution = <12>;
+	};
+
+	channel@3 {
+		reg = <3>;
+		zephyr,gain = "ADC_GAIN_1_4";
+		zephyr,reference = "ADC_REF_VDD_1_4";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 3)>;
+		zephyr,input-positive = <NRF_SAADC_AIN5>;
+		zephyr,vref-mv = <825>;
+		zephyr,resolution = <12>;
+	};
+
+	channel@4 {
+		reg = <4>;
+		zephyr,gain = "ADC_GAIN_1_2";
+		zephyr,reference = "ADC_REF_VDD_1_4";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 3)>;
+		zephyr,input-positive = <NRF_SAADC_AIN6>;
+		zephyr,vref-mv = <825>;
+		zephyr,resolution = <12>;
+	};
+
+	channel@5 {
+		reg = <5>;
+		zephyr,gain = "ADC_GAIN_1_2";
+		zephyr,reference = "ADC_REF_VDD_1_4";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 3)>;
+		zephyr,input-positive = <NRF_SAADC_AIN0>;
+		zephyr,vref-mv = <825>;
+		zephyr,resolution = <12>;
+	};
+};
+
+&gpiote {
+	status = "okay";
+};
+
+&gpio0 {
+	status = "okay";
+	sense-edge-mask = <0x00801400>;
+};
+
+&gpio1 {
+	status = "okay";
+	sense-edge-mask = <0x00000050>;
+};
+
+&uart0 {
+	compatible = "nordic,nrf-uarte";
+	status = "disabled";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart0_default>;
+	pinctrl-1 = <&uart0_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+&i2c0 {
+	compatible = "nordic,nrf-twim";
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_FAST>;
+	pinctrl-0 = <&i2c0_default>;
+	pinctrl-1 = <&i2c0_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	imu: lsm6dsv16x@6a {
+		compatible = "st,lsm6dsv16x";
+		reg = <0x6a>;
+		status = "okay";
+	};
+
+	mp2733: charger@4b {
+		compatible = "monolithicpower,mp2733";
+		reg = <0x4b>;
+		status = "okay";
+	};
+};
+
+&i2c1 {
+	compatible = "nordic,nrf-twim";
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_FAST>;
+	pinctrl-0 = <&i2c1_default>;
+	pinctrl-1 = <&i2c1_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	greenpak: gpio@10 {
+		compatible = "valve,slg4l48185-gpio";
+		reg = <0x10>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		ngpios = <16>;
+		gpio-reserved-ranges = <0 1>;
+		int-gpios = <&gpio1 7 GPIO_ACTIVE_HIGH>;
+		input-selector = <0xf0>;
+		poll-interval-ms = <20>;
+		status = "okay";
+	};
+
+	olympus: touch-controller@2c {
+		compatible = "valve,olympus";
+		reg = <0x2c>;
+		int-gpios = <&gpio0 6 GPIO_ACTIVE_LOW>;
+		reset-gpios = <&gpio0 15 GPIO_ACTIVE_HIGH>;
+		status = "okay";
+	};
+};
+
+&flash0 {
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		/*
+		 * Valve's bootloader occupies 0x00000-0x07fff and stores
+		 * the application header at 0x7cfe0-0x7cfff.
+		 */
+		application_partition: partition@8000 {
+			label = "application";
+			reg = <0x00008000 0x00070000>;
+		};
+
+		storage_partition: partition@78000 {
+			label = "storage";
+			reg = <0x00078000 0x00004000>;
+		};
+
+		valve_app_header: partition@7c000 {
+			label = "valve-app-header";
+			reg = <0x0007c000 0x00001000>;
+		};
+
+		valve_storage: partition@7d000 {
+			label = "valve-storage";
+			reg = <0x0007d000 0x00003000>;
+		};
+	};
+};
+
+&pwm1 {
+	status = "okay";
+	pinctrl-0 = <&pwm1_default>;
+	pinctrl-1 = <&pwm1_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+zephyr_udc0: &usbd {
+	compatible = "nordic,nrf-usbd";
+	status = "okay";
+
+	cdc_acm_uart0: cdc_acm_uart0 {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+};

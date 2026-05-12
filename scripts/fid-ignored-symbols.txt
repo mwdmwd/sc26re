@@ -1,0 +1,5 @@
+# Symbol names that are not wanted as Function ID labels.
+#
+# Entries may be exact names, shell-style globs, or /Java regexes/.
+
+/^sym_[0-9A-Za-z_]+$/

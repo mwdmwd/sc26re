@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+description: Valve Ibex analog stick and trigger input group
+
+compatible: "valve,ibex-analog-inputs"
+
+include: base.yaml
+
+properties:
+  enable-gpios:
+    type: phandle-array
+    required: true
+    description: Active-high power enable for the stick and trigger analog sensors.
+
+  io-channels:
+    type: phandle-array
+    required: true
+    description: Channels to scan.
+
+  io-channel-names:
+    type: string-array
+    required: true
+    description: Semantic names for the scanned channels.

@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+valve_bootloader:
+  address: 0x00000
+  end_address: 0x08000
+  region: flash_primary
+  size: 0x08000
+
+app:
+  address: 0x08000
+  end_address: 0x78000
+  region: flash_primary
+  size: 0x70000
+
+settings_storage:
+  address: 0x78000
+  end_address: 0x7c000
+  region: flash_primary
+  size: 0x04000
+
+valve_app_header:
+  address: 0x7c000
+  end_address: 0x7d000
+  region: flash_primary
+  size: 0x01000
+
+valve_storage:
+  address: 0x7d000
+  end_address: 0x80000
+  region: flash_primary
+  size: 0x03000
+
+sram_primary:
+  address: 0x20000000
+  end_address: 0x2001fff0
+  region: sram_primary
+  size: 0x1fff0

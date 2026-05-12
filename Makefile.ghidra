@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+ifeq ($(SC26RE_MAIN_INCLUDED),)
+.DEFAULT_GOAL := ghidra-fidb
+endif
+
+CORPUS_DIR ?= $(CURDIR)/corpus
+GHIDRA_HEADLESS ?= /opt/ghidra/support/analyzeHeadless
+GHIDRA_LANGUAGE ?= ARM:LE:32:Cortex
+GHIDRA_SCRIPT_PATH := $(CURDIR)/scripts;/opt/ghidra/Ghidra/Features/FunctionID/ghidra_scripts
+GHIDRA_IGNORED_SYMBOLS ?= $(CURDIR)/scripts/fid-ignored-symbols.txt
+
+ifeq ($(SC26RE_MAIN_INCLUDED),)
+.PHONY: corpus corpus-refresh
+corpus:
+	$(MAKE) -f Makefile corpus
+
+corpus-refresh:
+	$(MAKE) -f Makefile corpus-refresh
+endif
+
+.PHONY: ghidra-import-programs
+ghidra-import-programs: corpus
+	mkdir -p "$(CORPUS_DIR)/ghidra-project" "$(CORPUS_DIR)/reports"
+	"$(GHIDRA_HEADLESS)" "$(CORPUS_DIR)/ghidra-project" steamctl-ncs \
+		-import "$(CORPUS_DIR)/fid-programs" -recursive -overwrite \
+		-processor "$(GHIDRA_LANGUAGE)" -cspec default \
+		-scriptPath "$(GHIDRA_SCRIPT_PATH)" \
+		-preScript FunctionIDHeadlessPrescript.java \
+		-postScript FunctionIDHeadlessPostscript.java \
+		-log "$(CORPUS_DIR)/reports/ghidra-import.log"
+
+.PHONY: ghidra-import-archives
+ghidra-import-archives: corpus
+	mkdir -p "$(CORPUS_DIR)/ghidra-project" "$(CORPUS_DIR)/reports"
+	@if [ ! -d "$(CORPUS_DIR)/fid-archives" ]; then $(MAKE) corpus-refresh; fi
+	@set -eu; \
+	find "$(CORPUS_DIR)/fid-archives" -mindepth 4 -maxdepth 4 -type d -print | sort | while IFS= read -r variant_dir; do \
+		rel=$${variant_dir#"$(CORPUS_DIR)/fid-archives/"}; \
+		files=$$(find "$$variant_dir" -maxdepth 1 -type f -name '*.a' -print | sort); \
+		if [ -z "$$files" ]; then \
+			continue; \
+		fi; \
+		echo "importing archives into /fid-archives/$$rel"; \
+		"$(GHIDRA_HEADLESS)" "$(CORPUS_DIR)/ghidra-project" "steamctl-ncs/fid-archives/$$rel" \
+			-import $$files -recursive -overwrite \
+			-processor "$(GHIDRA_LANGUAGE)" -cspec default \
+			-scriptPath "$(GHIDRA_SCRIPT_PATH)" \
+			-preScript FunctionIDHeadlessPrescript.java \
+			-postScript FunctionIDHeadlessPostscript.java \
+			-log "$(CORPUS_DIR)/reports/ghidra-archive-import-$$(printf '%s' "$$rel" | tr / _).log"; \
+	done
+
+.PHONY: ghidra-fidb
+ghidra-fidb: ghidra-import-programs
+	$(MAKE) ghidra-import-archives
+	$(MAKE) ghidra-fidb-from-project
+
+.PHONY: ghidra-fidb-from-project
+ghidra-fidb-from-project:
+	mkdir -p "$(CORPUS_DIR)/fidb" "$(CORPUS_DIR)/reports"
+	"$(GHIDRA_HEADLESS)" "$(CORPUS_DIR)/ghidra-project" steamctl-ncs \
+		-scriptPath "$(CURDIR)/scripts" \
+		-postScript BuildFidDb.java \
+			"$(CORPUS_DIR)/fidb/steamctl-ncs.fidb" \
+			/fid-programs,/fid-archives \
+			"$(GHIDRA_LANGUAGE)" \
+			"$(GHIDRA_IGNORED_SYMBOLS)" \
+			"$(CORPUS_DIR)/reports/ghidra-fidb.log" \
+		-log "$(CORPUS_DIR)/reports/ghidra-fidb-headless.log"

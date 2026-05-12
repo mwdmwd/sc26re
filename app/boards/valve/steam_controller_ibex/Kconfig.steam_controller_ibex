@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+config BOARD_STEAM_CONTROLLER_IBEX
+	select SOC_NRF52833_QIAA

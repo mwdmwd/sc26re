@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+monolithicpower	Monolithic Power Systems
+valve	Valve Corporation
