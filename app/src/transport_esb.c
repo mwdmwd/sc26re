@@ -177,8 +177,19 @@ static void channel_map_work_handler(struct k_work *work)
 
 	ARG_UNUSED(work);
 
+	if(!esb_started)
+	{
+		return;
+	}
+
 	/* The original controller gives the puck's E4 reply time to finish. */
 	k_usleep(500);
+
+	if(!esb_started)
+	{
+		return;
+	}
+
 	switch_channel(channel);
 }
 
@@ -294,7 +305,7 @@ static void session_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
-	if(!session_pending)
+	if(!esb_started || !session_pending)
 	{
 		return;
 	}
@@ -330,6 +341,11 @@ static void channel_scan_work_handler(struct k_work *work)
 
 	ARG_UNUSED(work);
 
+	if(!esb_started)
+	{
+		return;
+	}
+
 	if(!session_connected || session_pending)
 	{
 		goto out;
@@ -352,7 +368,10 @@ static void channel_scan_work_handler(struct k_work *work)
 	}
 
 out:
-	k_work_reschedule(k_work_delayable_from_work(work), K_MSEC(ESB_CHANNEL_SCAN_INTERVAL_MS));
+	if(esb_started)
+	{
+		k_work_reschedule(k_work_delayable_from_work(work), K_MSEC(ESB_CHANNEL_SCAN_INTERVAL_MS));
+	}
 }
 
 K_WORK_DELAYABLE_DEFINE(channel_scan_work, channel_scan_work_handler);
@@ -693,16 +712,29 @@ void transport_esb_deactivate(void)
 		return;
 	}
 
-	k_work_cancel(&channel_map_work);
-	k_work_cancel(&session_work);
-	k_work_cancel_delayable(&channel_scan_work);
+	esb_started = false;
+
+	/* Cancel pending and in-flight work before touching the backend. */
+	if(k_current_get() == k_work_queue_thread_get(&k_sys_work_q))
+	{
+		k_work_cancel(&channel_map_work);
+		k_work_cancel(&session_work);
+		k_work_cancel_delayable(&channel_scan_work);
+	}
+	else
+	{
+		struct k_work_sync sync;
+		k_work_cancel_sync(&channel_map_work, &sync);
+		k_work_cancel_sync(&session_work, &sync);
+		k_work_cancel_delayable_sync(&channel_scan_work, &sync);
+	}
+
 	stop_and_flush();
 	valve_esb_backend_disable();
 	session_connected = false;
 	session_pending = false;
 	latest_input_valid = false;
 	latest_battery_valid = false;
-	esb_started = false;
 }
 
 static void build_input_payload(struct valve_esb_payload *payload, uint8_t report_id,
