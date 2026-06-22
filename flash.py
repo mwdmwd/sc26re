@@ -14,12 +14,10 @@ from pathlib import Path
 from collections.abc import Iterable
 from typing import Any, Self
 
-import hid
-import serial
-from serial.tools import list_ports
-
 if sys.platform == "darwin":
     try:
+        import hid
+
         hid.hidapi.hid_darwin_set_open_exclusive(0)
     except Exception:
         try:
@@ -389,6 +387,11 @@ def parse_hid_response(response: bytes | list[int], expected_opcode: int) -> byt
 
 
 def open_hid_device(path: bytes | str | None) -> Any:
+    # TODO after Python 3.15: search for `except ImportError` and use lazy import
+    try:
+        import hid
+    except ImportError as exc:
+        raise ToolError("ERROR: Missing hidapi Python module, install requirements.txt") from exc
     handle = hid.device()
     handle.open_path(path)
     return handle
@@ -628,6 +631,10 @@ def try_save_cfw_nvs_from_device(device: Device, *, verbose: bool = False) -> Cf
 
 
 def enumerate_hid_devices(*, info_only: bool = False, verbose: bool = False) -> list[Device]:
+    try:
+        import hid
+    except ImportError as exc:
+        raise ToolError("ERROR: Missing hidapi Python module, install requirements.txt") from exc
     devices: list[Device] = []
     seen_dongles: set[str | None] = set()
     for pid, type_id in HID_PIDS.items():
@@ -843,6 +850,10 @@ def decode_frame_bytes(frame: bytes) -> bytes:
 
 
 def read_frame(port: Any) -> tuple[bytes, bytes]:
+    try:
+        import serial
+    except ImportError as exc:
+        raise ToolError("ERROR: Missing pyserial Python module, install requirements.txt") from exc
     raw = bytearray()
     in_frame = False
     while True:
@@ -985,6 +996,11 @@ def detect_bootloader_class(port_info: Any) -> str | None:
 
 
 def list_bootloader_ports(verbose: bool = False) -> list[tuple[str, str]]:
+    try:
+        from serial.tools import list_ports
+    except ImportError as exc:
+        raise ToolError("ERROR: Missing pyserial Python module, install requirements.txt") from exc
+
     ports = list(list_ports.comports())
     if any(detect_bootloader_class(port) == "proteus" for port in ports):
         time.sleep(5)
@@ -998,6 +1014,10 @@ def list_bootloader_ports(verbose: bool = False) -> list[tuple[str, str]]:
 
 
 def open_serial_port(port_name: str, *, verbose: bool = False) -> Any:
+    try:
+        import serial
+    except ImportError as exc:
+        raise ToolError("ERROR: Missing pyserial Python module, install requirements.txt") from exc
     last_exc: Exception | None = None
     for _ in range(10):
         try:
@@ -1501,6 +1521,11 @@ def find_bootloader_by_serial(serial: str, verbose: bool = False) -> BootInfo:
 
 
 def class_for_port(port_name: str, verbose: bool = False) -> str | None:
+    try:
+        from serial.tools import list_ports
+    except ImportError as exc:
+        raise ToolError("ERROR: Missing pyserial Python module, install requirements.txt") from exc
+
     for port in list_ports.comports():
         if str(port.device) == port_name:
             return detect_bootloader_class(port)
