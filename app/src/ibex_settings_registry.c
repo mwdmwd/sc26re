@@ -68,6 +68,7 @@ static const struct ibex_setting_entry setting_entries[IBEX_SETTING_COUNT] = {
 	[25] = SETTING_ENTRY(40, 3, 99, "steambutton_poweroff_time", NULL),
 	[26] = SETTING_ENTRY(0, 0, 1, "unused_1", NULL),
 	[27] = OFW_SETTING_ENTRY(-10, -24, 12, "haptic_rumble_gain_db_offset", NULL),
+	/* OFW reports these max values even though the reset defaults exceed them. */
 	[28] = SETTING_ENTRY(16500, 0, 4096, "trackpad_z_on_left", NULL),
 	[29] = SETTING_ENTRY(15000, 0, 4096, "trackpad_z_off_left", NULL),
 	[30] = OFW_SETTING_ENTRY(500, 100, 1000, "olympus_click_press", NULL),
