@@ -24,6 +24,17 @@ LOG_MODULE_REGISTER(battery);
 #define MP2733_REG_CONVERTER_CTRL_B 0x08
 #define MP2733_REG_STATUS_BASE 0x0c
 #define MP2733_ADC_ENABLE BIT(6)
+#define MP2733_VIN_STAT_SHIFT 5
+#define MP2733_VIN_STAT_MASK 0x07
+enum mp2733_chg_stat
+{
+	MP2733_NOT_CHARGING = 0,
+	MP2733_TRICKLE = 1,
+	MP2733_CONSTANT_CURRENT = 2,
+	MP2733_DONE = 3,
+};
+#define MP2733_CHG_STAT_SHIFT 3
+#define MP2733_CHG_STAT_MASK 0x03
 
 #define BATTERY_POLL_PERIOD_MS 30000
 #define BATTERY_INITIAL_POLL_DELAY_MS 500
@@ -66,24 +77,32 @@ static uint8_t mp2733_level_from_voltage(uint16_t mv)
 	                 (BATTERY_FULL_MV - BATTERY_EMPTY_MV));
 }
 
-static uint16_t mp2733_current_ma(uint8_t charge_state, uint8_t raw)
+static uint8_t mp2733_charge_state(enum mp2733_chg_stat chg_stat, bool vin_stat)
 {
-	if(charge_state == CONTROLLER_CHARGE_STATE_DISCHARGING ||
-	   charge_state == CONTROLLER_CHARGE_STATE_CHARGING)
+	switch(chg_stat)
 	{
-		return (uint16_t)(((uint32_t)17500U * raw) / 1000U);
+		case MP2733_TRICKLE:
+		case MP2733_CONSTANT_CURRENT:
+			return CONTROLLER_CHARGE_STATE_CHARGING;
+		case MP2733_DONE:
+			return CONTROLLER_CHARGE_STATE_CHARGING_DONE;
+		case MP2733_NOT_CHARGING:
+		default:
+			return vin_stat ? CONTROLLER_CHARGE_STATE_SOURCE_VALIDATE
+			                : CONTROLLER_CHARGE_STATE_DISCHARGING;
 	}
-	if(raw == 0)
-	{
-		return 0;
-	}
-	return (uint16_t)(((uint32_t)70000U * raw + 200000U) / 1000U);
+}
+
+static uint16_t mp2733_current_ma(uint8_t raw)
+{
+	return (uint16_t)(((uint32_t)17500U * raw) / 1000U);
 }
 
 static int battery_poll_once(struct controller_battery_report *report)
 {
 	uint8_t raw[8];
-	uint8_t charge_state;
+	enum mp2733_chg_stat chg_stat;
+	bool vin_stat;
 	int err;
 
 	if(!i2c_is_ready_dt(&mp2733))
@@ -107,16 +126,17 @@ static int battery_poll_once(struct controller_battery_report *report)
 		return err;
 	}
 
-	charge_state = (raw[0] >> 3) & 0x03;
+	vin_stat = (raw[0] >> MP2733_VIN_STAT_SHIFT) & MP2733_VIN_STAT_MASK;
+	chg_stat = (raw[0] >> MP2733_CHG_STAT_SHIFT) & MP2733_CHG_STAT_MASK;
 	memset(report, 0, sizeof(*report));
-	report->charge_state = charge_state;
+	report->charge_state = mp2733_charge_state(chg_stat, vin_stat);
 	report->battery_mv = 20U * raw[2];
 	report->system_mv = 20U * raw[3];
 	report->input_mv = 60U * raw[5];
-	report->current_ma = mp2733_current_ma(charge_state, raw[6]);
+	report->current_ma = mp2733_current_ma(raw[6]);
 	report->input_current_ma = ((uint32_t)13300U * raw[7]) / 1000U;
 	report->level_percent = mp2733_level_from_voltage(report->battery_mv);
-	report->charger_type = raw[1] & 0x07;
+	report->charger_type = vin_stat;
 	report->valid = true;
 	return 0;
 }
