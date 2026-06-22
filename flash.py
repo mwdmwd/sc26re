@@ -592,6 +592,22 @@ def cfw_nvs_write_image(
             percent = int(((offset + len(chunk)) * 100) / size)
             out(f"NVS RESTORE: {percent}%")
 
+    restored = cfw_nvs_read_image(handle, report_id)
+    if restored is None:
+        raise ToolError("ERROR: Device does not expose CFW NVS verification support")
+    if restored.data != image.data:
+        mismatch = next(
+            (
+                index
+                for index, (expected, actual) in enumerate(zip(image.data, restored.data))
+                if expected != actual
+            ),
+            min(len(image.data), len(restored.data)),
+        )
+        raise ToolError(f"ERROR: CFW NVS restore verification failed at offset 0x{mismatch:04x}")
+    if verbose:
+        out("NVS VERIFY: 100%")
+
 
 def save_cfw_nvs_from_device(device: Device, *, verbose: bool = False) -> CfwNvsImage | None:
     handle = None
