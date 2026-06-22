@@ -152,10 +152,9 @@ static void battery_thread_entry(void *p1, void *p2, void *p3)
 			cached_report = report;
 			k_mutex_unlock(&battery_lock);
 			battery_publish(&report);
-			LOG_INF("battery: %u%% %umV state=%s input=%umV ichg=%umA type=%u",
-			        report.level_percent, report.battery_mv,
-			        battery_charge_state_name(report.charge_state), report.input_mv,
-			        report.current_ma, report.charger_type);
+			LOG_INF("%u%% %umV state=%s input=%umV ichg=%umA type=%u", report.level_percent,
+			        report.battery_mv, battery_charge_state_name(report.charge_state),
+			        report.input_mv, report.current_ma, report.charger_type);
 		}
 
 		k_msleep(BATTERY_POLL_PERIOD_MS);
