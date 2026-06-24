@@ -383,7 +383,10 @@ bool ibex_settings_feature_write(const uint8_t *request, size_t request_len)
 				uint8_t id = body[offset];
 				int16_t value = (int16_t)sys_get_le16(&body[offset + 1]);
 
-				(void)ibex_setting_set(id, value);
+				if(ibex_setting_set(id, value) != 0)
+				{
+					return false;
+				}
 			}
 			return true;
 		case ID_LOAD_DEFAULT_SETTINGS:

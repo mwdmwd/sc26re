@@ -399,8 +399,8 @@ static void log_feature_response(enum valve_feature_link link, uint8_t opcode,
 	}
 }
 
-static void prepare_feature_response(enum valve_feature_link link, const uint8_t *request,
-                                     size_t len, uint8_t *response, size_t response_capacity)
+static ssize_t build_feature_response(enum valve_feature_link link, const uint8_t *request,
+                                      size_t len, uint8_t *response, size_t response_capacity)
 {
 	uint8_t *end = &response[response_capacity];
 	char path[VALVE_SETTINGS_PATH_MAX];
@@ -409,19 +409,19 @@ static void prepare_feature_response(enum valve_feature_link link, const uint8_t
 
 	if(response_capacity < 2)
 	{
-		return;
+		return -ENOSPC;
 	}
 
 	uint8_t *cursor = &response[2];
 	memset(response, 0, response_capacity);
 	if(len == 0)
 	{
-		return;
+		return -EINVAL;
 	}
 	strip_report_id(&request, &len);
 	if(len == 0)
 	{
-		return;
+		return -EINVAL;
 	}
 
 	opcode = request[0];
@@ -474,34 +474,46 @@ static void prepare_feature_response(enum valve_feature_link link, const uint8_t
 		{
 			size_t settings_len;
 
-			if(ibex_settings_feature_response(request, len, cursor, end - cursor, &settings_len))
+			if(!ibex_settings_feature_response(request, len, cursor, end - cursor, &settings_len))
 			{
-				cursor += settings_len;
+				return -EINVAL;
 			}
+			cursor += settings_len;
 			break;
 		}
-		default:
+		case VALVE_FEATURE_SET_DIGITAL_MAPPINGS:
+		case VALVE_FEATURE_CLEAR_DIGITAL_MAPPINGS:
+		case VALVE_FEATURE_SET_DEFAULT_DIGITAL_MAPPINGS:
+		case VALVE_FEATURE_SET_SETTINGS_VALUES:
+		case VALVE_FEATURE_REBOOT_TO_ISP:
+		case VALVE_FEATURE_FIRMWARE_UPDATE_REBOOT:
+		case VALVE_FEATURE_TURN_OFF_CONTROLLER:
+		case VALVE_FEATURE_STAGE_SETTING:
+		case VALVE_FEATURE_COMMIT_SETTING:
 			break;
+		default:
+			return -ENOTSUP;
 	}
 
 	response[1] = cursor - &response[2];
 	log_feature_response(link, opcode, response);
 	LOG_HEXDUMP_DBG(response, MIN(response_capacity, 40), "feature response");
+	return (ssize_t)(response[1] + 2);
 }
 
-static void handle_feature_request(enum valve_feature_link link, const uint8_t *request, size_t len)
+static int handle_feature_request(enum valve_feature_link link, const uint8_t *request, size_t len)
 {
 	char path[VALVE_SETTINGS_PATH_MAX];
 	size_t value_offset;
 
 	if(len == 0)
 	{
-		return;
+		return -EINVAL;
 	}
 	strip_report_id(&request, &len);
 	if(len == 0)
 	{
-		return;
+		return -EINVAL;
 	}
 
 	log_feature_request(link, request, len);
@@ -513,16 +525,18 @@ static void handle_feature_request(enum valve_feature_link link, const uint8_t *
 		switch(request[0])
 		{
 			case VALVE_FEATURE_STAGE_SETTING:
-				(void)valve_settings_stage(path, &request[value_offset], value_len);
-				break;
+				return valve_settings_stage(path, &request[value_offset], value_len);
 			case VALVE_FEATURE_COMMIT_SETTING:
-				(void)valve_settings_commit(path);
-				break;
+				return valve_settings_commit(path);
 			default:
 				break;
 		}
 	}
-	(void)ibex_settings_feature_write(request, len);
+
+	if(ibex_settings_feature_write(request, len))
+	{
+		return 0;
+	}
 
 	switch(request[0])
 	{
@@ -531,26 +545,28 @@ static void handle_feature_request(enum valve_feature_link link, const uint8_t *
 			const uint8_t *body;
 			size_t body_len;
 
-			if(feature_request_body(request, len, &body, &body_len))
+			if(!feature_request_body(request, len, &body, &body_len))
 			{
-				digital_mappings_len = MIN(body_len, sizeof(digital_mappings));
-				memcpy(digital_mappings, body, digital_mappings_len);
+				return -EINVAL;
 			}
-			break;
+
+			digital_mappings_len = MIN(body_len, sizeof(digital_mappings));
+			memcpy(digital_mappings, body, digital_mappings_len);
+			return 0;
 		}
 		case VALVE_FEATURE_CLEAR_DIGITAL_MAPPINGS:
 			digital_mappings_len = 0;
-			break;
+			return 0;
 		case VALVE_FEATURE_SET_DEFAULT_DIGITAL_MAPPINGS:
 			digital_mappings_len = 0;
-			break;
+			return 0;
 		case VALVE_FEATURE_REBOOT_TO_ISP:
 			(void)power_reboot_to_valve_isp();
-			break;
+			return 0;
 		case VALVE_FEATURE_TURN_OFF_CONTROLLER:
 			LOG_INF("Steam requested controller power-off");
 			(void)k_work_schedule(&turn_off_work, K_MSEC(VALVE_TURN_OFF_DELAY_MS));
-			break;
+			return 0;
 		case VALVE_FEATURE_FIRMWARE_UPDATE_REBOOT:
 			if(IS_ENABLED(CONFIG_IBEX_ESB) &&
 			   len >= 6 &&
@@ -568,31 +584,116 @@ static void handle_feature_request(enum valve_feature_link link, const uint8_t *
 			{
 				(void)power_reboot_normal();
 			}
-			break;
+			return 0;
+		case VALVE_FEATURE_GET_ATTRIBUTES_VALUES:
+		case VALVE_FEATURE_GET_STRING_ATTRIBUTE:
+		case VALVE_FEATURE_GET_SYSTEM_INFO:
+		case VALVE_FEATURE_GET_DIGITAL_MAPPINGS:
+		case VALVE_FEATURE_GET_DEVICE_INFO:
+		case VALVE_FEATURE_GET_CHIPID:
+		case VALVE_FEATURE_READ_SETTING:
+		case VALVE_FEATURE_GET_SETTINGS_VALUES:
+		case VALVE_FEATURE_GET_SETTINGS_MAXS:
+		case VALVE_FEATURE_GET_SETTINGS_DEFAULTS:
+			return 0;
+		case VALVE_FEATURE_SET_SETTINGS_VALUES:
+		case VALVE_FEATURE_STAGE_SETTING:
+		case VALVE_FEATURE_COMMIT_SETTING:
+			return -EINVAL;
 		default:
-			break;
+			return -ENOTSUP;
 	}
+}
+
+static size_t feature_response_min_capacity(enum valve_feature_link link)
+{
+	switch(link)
+	{
+		case VALVE_FEATURE_LINK_USB:
+			return VALVE_FEATURE_REPORT_SIZE - 1;
+		case VALVE_FEATURE_LINK_BLE:
+		case VALVE_FEATURE_LINK_ESB:
+		default:
+			return VALVE_FEATURE_REPORT_SIZE;
+	}
+}
+
+static int feature_validate_request(const uint8_t *request, size_t request_len)
+{
+	if(request == NULL || request_len == 0 || request_len > VALVE_FEATURE_REPORT_SIZE)
+	{
+		return -EINVAL;
+	}
+
+	strip_report_id(&request, &request_len);
+	if(request_len == 0)
+	{
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+int valve_feature_handle_request(enum valve_feature_link link, const uint8_t *request,
+                                 size_t request_len)
+{
+	int err = feature_validate_request(request, request_len);
+
+	if(err)
+	{
+		return err;
+	}
+
+	return handle_feature_request(link, request, request_len);
+}
+
+ssize_t valve_feature_prepare_response(enum valve_feature_link link, const uint8_t *request,
+                                       size_t request_len, uint8_t *response,
+                                       size_t response_capacity)
+{
+	int err = feature_validate_request(request, request_len);
+	ssize_t response_len;
+
+	if(err)
+	{
+		if(response != NULL)
+		{
+			memset(response, 0, response_capacity);
+		}
+		return err;
+	}
+
+	if(response == NULL || response_capacity < feature_response_min_capacity(link))
+	{
+		if(response != NULL)
+		{
+			memset(response, 0, response_capacity);
+		}
+		return -ENOSPC;
+	}
+
+	response_len = build_feature_response(link, request, request_len, response, response_capacity);
+	if(response_len < 0)
+	{
+		memset(response, 0, response_capacity);
+	}
+
+	return response_len;
 }
 
 ssize_t valve_feature_respond(enum valve_feature_link link, const uint8_t *request,
                               size_t request_len, uint8_t *response, size_t response_capacity)
 {
-	if(request_len == 0 || request_len > VALVE_FEATURE_REPORT_SIZE)
+	int err = valve_feature_handle_request(link, request, request_len);
+
+	if(err)
 	{
-		memset(response, 0, response_capacity);
-		return -EINVAL;
+		if(response != NULL)
+		{
+			memset(response, 0, response_capacity);
+		}
+		return err;
 	}
 
-	size_t min_capacity =
-	    link == VALVE_FEATURE_LINK_USB ? VALVE_FEATURE_REPORT_SIZE - 1 : VALVE_FEATURE_REPORT_SIZE;
-
-	if(response_capacity < min_capacity)
-	{
-		memset(response, 0, response_capacity);
-		return -ENOSPC;
-	}
-
-	handle_feature_request(link, request, request_len);
-	prepare_feature_response(link, request, request_len, response, response_capacity);
-	return (ssize_t)(response[1] + 2);
+	return valve_feature_prepare_response(link, request, request_len, response, response_capacity);
 }
