@@ -11,7 +11,6 @@
 #include "controller.h"
 #include "ibex_settings_registry.h"
 #include "power.h"
-#include "sdl/controller_constants.h"
 #include "valve_feature.h"
 #include "valve_identity.h"
 #include "valve_settings.h"
@@ -29,15 +28,6 @@ LOG_MODULE_REGISTER(valve_feature);
 #define VALVE_FICR_DEVICEID_BASE 0x10000060u
 #define VALVE_STRING_ATTRIBUTE_SIZE 20
 #define VALVE_STRING_ATTRIBUTE_TEXT_SIZE (VALVE_STRING_ATTRIBUTE_SIZE - 1)
-#define VALVE_FIRMWARE_UPDATE_REBOOT 0x95
-#define VALVE_FIRMWARE_UPDATE_REBOOT_ISP 0x90
-#define VALVE_SET_LED_COLOR 0xc5
-#define VALVE_SET_USER_STORE 0xdc
-#define VALVE_SET_TRACKPAD_SIDE 0xe2
-#define VALVE_GET_VERSION_ATTRIBUTE 0xf2
-#define VALVE_SETTINGS_READ 0xed
-#define VALVE_SETTINGS_STAGE 0xee
-#define VALVE_SETTINGS_COMMIT 0xef
 #define VALVE_TURN_OFF_DELAY_MS 150
 #define VALVE_ESB_HANDOFF_SIGNATURE 0xa427af52
 #define VALVE_ESB_HANDOFF_REBOOT_DELAY_MS 150
@@ -143,58 +133,45 @@ static const char *feature_link_name(enum valve_feature_link link)
 
 static const char *feature_opcode_name(uint8_t opcode)
 {
+#define NAME(x) case VALVE_FEATURE_##x: return #x;
 	switch(opcode)
 	{
-		case ID_SET_DIGITAL_MAPPINGS:
-			return "SET_DIGITAL_MAPPINGS";
-		case ID_CLEAR_DIGITAL_MAPPINGS:
-			return "CLEAR_DIGITAL_MAPPINGS";
-		case ID_GET_DIGITAL_MAPPINGS:
-			return "GET_DIGITAL_MAPPINGS";
-		case ID_SET_DEFAULT_DIGITAL_MAPPINGS:
-			return "SET_DEFAULT_DIGITAL_MAPPINGS";
-		case ID_GET_ATTRIBUTES_VALUES:
-			return "GET_ATTRIBUTES_VALUES";
-		case ID_SET_SETTINGS_VALUES:
-			return "SET_SETTINGS_VALUES";
-		case ID_CLEAR_SETTINGS_VALUES:
-			return "CLEAR_SETTINGS_VALUES";
-		case ID_GET_SETTINGS_VALUES:
-			return "GET_SETTINGS_VALUES";
-		case ID_GET_SETTINGS_MAXS:
-			return "GET_SETTINGS_MAXS";
-		case ID_GET_SETTINGS_DEFAULTS:
-			return "GET_SETTINGS_DEFAULTS";
-		case ID_LOAD_DEFAULT_SETTINGS:
-			return "LOAD_DEFAULT_SETTINGS";
-		case ID_TURN_OFF_CONTROLLER:
-			return "TURN_OFF_CONTROLLER";
-		case ID_GET_DEVICE_INFO:
-			return "GET_DEVICE_INFO";
-		case ID_GET_STRING_ATTRIBUTE:
-			return "GET_STRING_ATTRIBUTE";
-		case ID_GET_CHIPID:
-			return "GET_CHIPID";
-		case ID_SET_AUDIO_MAPPING:
-			return "SET_AUDIO_MAPPING";
-		case VALVE_SET_LED_COLOR:
-			return "SET_LED_COLOR";
-		case VALVE_SET_USER_STORE:
-			return "SET_USER_STORE";
-		case VALVE_SET_TRACKPAD_SIDE:
-			return "SET_TRACKPAD_SIDE";
-		case VALVE_FIRMWARE_UPDATE_REBOOT:
-			return "FIRMWARE_UPDATE_REBOOT";
-		case VALVE_FIRMWARE_UPDATE_REBOOT_ISP:
-			return "FIRMWARE_UPDATE_REBOOT_ISP";
-		case VALVE_GET_VERSION_ATTRIBUTE:
-			return "GET_VERSION_ATTRIBUTE";
-		case VALVE_SETTINGS_READ:
-			return "SETTINGS_READ";
-		case VALVE_SETTINGS_STAGE:
-			return "SETTINGS_STAGE";
-		case VALVE_SETTINGS_COMMIT:
-			return "SETTINGS_COMMIT";
+		NAME(SET_DIGITAL_MAPPINGS)
+		NAME(CLEAR_DIGITAL_MAPPINGS)
+		NAME(GET_DIGITAL_MAPPINGS)
+		NAME(GET_ATTRIBUTES_VALUES)
+		NAME(SET_DEFAULT_DIGITAL_MAPPINGS)
+		NAME(FACTORY_RESET)
+		NAME(SET_SETTINGS_VALUES)
+		NAME(CLEAR_SETTINGS_VALUES)
+		NAME(GET_SETTINGS_VALUES)
+		NAME(GET_SETTINGS_MAXS)
+		NAME(GET_SETTINGS_DEFAULTS)
+		NAME(LOAD_DEFAULT_SETTINGS)
+		NAME(REBOOT_TO_ISP)
+		NAME(FIRMWARE_UPDATE_REBOOT)
+		NAME(TURN_OFF_CONTROLLER)
+		NAME(GET_DEVICE_INFO)
+		NAME(WRITE_CALIBRATION_DATA)
+		NAME(GET_STRING_ATTRIBUTE)
+		NAME(GET_CHIPID)
+		NAME(GET_BATTERY_DATA)
+		NAME(CALIBRATE_ANALOG_TRIGGERS)
+		NAME(SET_AUDIO_MAPPING)
+		NAME(CALIBRATE_PRESSURE_SENSORS)
+		NAME(SET_LED_COLOR)
+		NAME(CALIBRATE_TRACKPAD_STICK)
+		NAME(GET_USER_STORE)
+		NAME(SET_USER_STORE)
+		NAME(SET_TRACKPAD_SIDE)
+		NAME(GET_LED_COLOR)
+		NAME(READ_SETTING)
+		NAME(STAGE_SETTING)
+		NAME(COMMIT_SETTING)
+		NAME(DELETE_SETTING)
+		NAME(GET_SYSTEM_INFO)
+		NAME(WRITE_PROVISIONING)
+#undef NAME
 		default:
 			return "?";
 	}
@@ -234,7 +211,7 @@ static void log_feature_request(enum valve_feature_link link, const uint8_t *req
 	feature_log_count++;
 	LOG_INF("%s feature 0x%02x %s len=%u", feature_link_name(link), opcode,
 	        feature_opcode_name(opcode), len);
-	if(opcode == ID_SET_SETTINGS_VALUES)
+	if(opcode == VALVE_FEATURE_SET_SETTINGS_VALUES)
 	{
 		log_settings_write(link, request, len);
 	}
@@ -409,10 +386,10 @@ static void log_feature_response(enum valve_feature_link link, uint8_t opcode,
 
 	switch(opcode)
 	{
-		case ID_GET_ATTRIBUTES_VALUES:
-		case ID_GET_DIGITAL_MAPPINGS:
-		case ID_GET_DEVICE_INFO:
-		case ID_GET_CHIPID:
+		case VALVE_FEATURE_GET_ATTRIBUTES_VALUES:
+		case VALVE_FEATURE_GET_DIGITAL_MAPPINGS:
+		case VALVE_FEATURE_GET_DEVICE_INFO:
+		case VALVE_FEATURE_GET_CHIPID:
 			feature_response_log_count++;
 			LOG_INF("%s feature 0x%02x response len=%u", feature_link_name(link), opcode,
 			        response[1]);
@@ -452,25 +429,25 @@ static void prepare_feature_response(enum valve_feature_link link, const uint8_t
 
 	switch(opcode)
 	{
-		case ID_GET_ATTRIBUTES_VALUES:
+		case VALVE_FEATURE_GET_ATTRIBUTES_VALUES:
 			prepare_device_attributes(link, &cursor);
 			break;
-		case ID_GET_STRING_ATTRIBUTE:
+		case VALVE_FEATURE_GET_STRING_ATTRIBUTE:
 			prepare_string_attribute(link, request, len, &cursor);
 			break;
-		case VALVE_GET_VERSION_ATTRIBUTE:
+		case VALVE_FEATURE_GET_SYSTEM_INFO:
 			prepare_version_attribute(request, len, &cursor);
 			break;
-		case ID_GET_DIGITAL_MAPPINGS:
+		case VALVE_FEATURE_GET_DIGITAL_MAPPINGS:
 			prepare_digital_mappings(request, len, &cursor, end);
 			break;
-		case ID_GET_DEVICE_INFO:
+		case VALVE_FEATURE_GET_DEVICE_INFO:
 			prepare_device_info(request, len, &cursor, end);
 			break;
-		case ID_GET_CHIPID:
+		case VALVE_FEATURE_GET_CHIPID:
 			prepare_chip_id(&cursor, end);
 			break;
-		case VALVE_SETTINGS_READ:
+		case VALVE_FEATURE_READ_SETTING:
 			if(request_path(request, len, path, sizeof(path), &value_offset))
 			{
 				size_t setting_len;
@@ -489,11 +466,11 @@ static void prepare_feature_response(enum valve_feature_link link, const uint8_t
 				*cursor++ = 0;
 			}
 			break;
-		case ID_CLEAR_SETTINGS_VALUES:
-		case ID_GET_SETTINGS_VALUES:
-		case ID_GET_SETTINGS_MAXS:
-		case ID_GET_SETTINGS_DEFAULTS:
-		case ID_LOAD_DEFAULT_SETTINGS:
+		case VALVE_FEATURE_CLEAR_SETTINGS_VALUES:
+		case VALVE_FEATURE_GET_SETTINGS_VALUES:
+		case VALVE_FEATURE_GET_SETTINGS_MAXS:
+		case VALVE_FEATURE_GET_SETTINGS_DEFAULTS:
+		case VALVE_FEATURE_LOAD_DEFAULT_SETTINGS:
 		{
 			size_t settings_len;
 
@@ -535,10 +512,10 @@ static void handle_feature_request(enum valve_feature_link link, const uint8_t *
 
 		switch(request[0])
 		{
-			case VALVE_SETTINGS_STAGE:
+			case VALVE_FEATURE_STAGE_SETTING:
 				(void)valve_settings_stage(path, &request[value_offset], value_len);
 				break;
-			case VALVE_SETTINGS_COMMIT:
+			case VALVE_FEATURE_COMMIT_SETTING:
 				(void)valve_settings_commit(path);
 				break;
 			default:
@@ -549,7 +526,7 @@ static void handle_feature_request(enum valve_feature_link link, const uint8_t *
 
 	switch(request[0])
 	{
-		case ID_SET_DIGITAL_MAPPINGS:
+		case VALVE_FEATURE_SET_DIGITAL_MAPPINGS:
 		{
 			const uint8_t *body;
 			size_t body_len;
@@ -561,20 +538,20 @@ static void handle_feature_request(enum valve_feature_link link, const uint8_t *
 			}
 			break;
 		}
-		case ID_CLEAR_DIGITAL_MAPPINGS:
+		case VALVE_FEATURE_CLEAR_DIGITAL_MAPPINGS:
 			digital_mappings_len = 0;
 			break;
-		case ID_SET_DEFAULT_DIGITAL_MAPPINGS:
+		case VALVE_FEATURE_SET_DEFAULT_DIGITAL_MAPPINGS:
 			digital_mappings_len = 0;
 			break;
-		case VALVE_FIRMWARE_UPDATE_REBOOT_ISP:
+		case VALVE_FEATURE_REBOOT_TO_ISP:
 			(void)power_reboot_to_valve_isp();
 			break;
-		case ID_TURN_OFF_CONTROLLER:
+		case VALVE_FEATURE_TURN_OFF_CONTROLLER:
 			LOG_INF("Steam requested controller power-off");
 			(void)k_work_schedule(&turn_off_work, K_MSEC(VALVE_TURN_OFF_DELAY_MS));
 			break;
-		case VALVE_FIRMWARE_UPDATE_REBOOT:
+		case VALVE_FEATURE_FIRMWARE_UPDATE_REBOOT:
 			if(IS_ENABLED(CONFIG_IBEX_ESB) &&
 			   len >= 6 &&
 			   request[1] == sizeof(uint32_t) &&
