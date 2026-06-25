@@ -228,7 +228,7 @@ int transport_send(const struct controller_report *report)
 	{
 		return usb_err;
 	}
-	if(ble_err != -ENOTSUP && ble_err != -ENOTCONN)
+	if(ble_err != -ENOTSUP && ble_err != -ENOTCONN && ble_err != -EAGAIN && ble_err != -EBUSY)
 	{
 		return ble_err;
 	}

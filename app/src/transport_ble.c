@@ -572,8 +572,8 @@ int transport_ble_send(const struct controller_report *report)
 		int err;
 
 		fill_state_report(&input_45, report);
-		err = bt_gatt_notify(NULL, &hog_service.attrs[VALVE_BLE_STATE_INPUT_ATTR], input_45.data,
-		                     input_45.size);
+		err = bt_gatt_notify(active_conn, &hog_service.attrs[VALVE_BLE_STATE_INPUT_ATTR],
+		                     input_45.data, input_45.size);
 		if(!err)
 		{
 			input_45_reports_sent++;
@@ -588,12 +588,12 @@ int transport_ble_send(const struct controller_report *report)
 			input_notify_error_logs++;
 			LOG_WRN("BLE report 0x45 notify failed: %d", err);
 		}
-		return err;
+		return err == -ENOMEM ? -EAGAIN : err;
 	}
 
 	fill_state_report(&input_42, report);
-	int err = bt_gatt_notify(NULL, &hog_service.attrs[VALVE_PRIMARY_INPUT_ATTR], input_42.data,
-	                         input_42.size);
+	int err = bt_gatt_notify(active_conn, &hog_service.attrs[VALVE_PRIMARY_INPUT_ATTR],
+	                         input_42.data, input_42.size);
 
 	if(!err)
 	{
@@ -609,7 +609,7 @@ int transport_ble_send(const struct controller_report *report)
 		input_notify_error_logs++;
 		LOG_WRN("BLE report 0x42 notify failed: %d", err);
 	}
-	return err;
+	return err == -ENOMEM ? -EAGAIN : err;
 }
 
 int transport_ble_send_battery_status(const struct controller_battery_report *report)
@@ -637,6 +637,11 @@ int transport_ble_send_battery_status(const struct controller_battery_report *re
 	sys_put_le16(report->input_current_ma, &input_43.data[10]);
 	sys_put_le16(report->temperature_c, &input_43.data[12]);
 
-	return bt_gatt_notify(NULL, &hog_service.attrs[VALVE_BATTERY_INPUT_ATTR], input_43.data,
+	if(active_conn == NULL)
+	{
+		return -ENOTCONN;
+	}
+
+	return bt_gatt_notify(active_conn, &hog_service.attrs[VALVE_BATTERY_INPUT_ATTR], input_43.data,
 	                      input_43.size);
 }
