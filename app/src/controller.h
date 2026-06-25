@@ -81,6 +81,7 @@ struct controller_battery_report
 	uint16_t input_current_ma;
 	uint16_t temperature_c;
 	uint8_t charger_type;
+	bool charge_complete;
 	bool valid;
 } __packed;
 

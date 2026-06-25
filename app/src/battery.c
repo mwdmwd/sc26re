@@ -40,7 +40,9 @@ enum mp2733_chg_stat
 #define BATTERY_INITIAL_POLL_DELAY_MS 500
 #define BATTERY_ADC_SETTLE_MS 164
 #define BATTERY_EMPTY_MV 3400
-#define BATTERY_FULL_MV 4200
+/* "full": LED turns off when charging, "SoC100": scale for charge level */
+#define BATTERY_FULL_MV 4120
+#define BATTERY_SOC100_MV 4200
 
 static const struct i2c_dt_spec mp2733 = I2C_DT_SPEC_GET(MP2733_NODE);
 static struct controller_battery_report cached_report;
@@ -69,15 +71,15 @@ static uint8_t mp2733_level_from_voltage(uint16_t mv)
 	{
 		return 0;
 	}
-	if(mv >= BATTERY_FULL_MV)
+	if(mv >= BATTERY_SOC100_MV)
 	{
 		return 100;
 	}
 	return (uint8_t)(((uint32_t)(mv - BATTERY_EMPTY_MV) * 100U) /
-	                 (BATTERY_FULL_MV - BATTERY_EMPTY_MV));
+	                 (BATTERY_SOC100_MV - BATTERY_EMPTY_MV));
 }
 
-static uint8_t mp2733_charge_state(enum mp2733_chg_stat chg_stat, bool vin_stat)
+static uint8_t mp2733_charge_state(enum mp2733_chg_stat chg_stat, uint8_t vin_stat)
 {
 	switch(chg_stat)
 	{
@@ -98,11 +100,22 @@ static uint16_t mp2733_current_ma(uint8_t raw)
 	return (uint16_t)(((uint32_t)17500U * raw) / 1000U);
 }
 
+static bool mp2733_charge_complete(enum mp2733_chg_stat chg_stat, uint8_t vin_stat,
+                                   uint16_t battery_mv)
+{
+	if(vin_stat == 0U)
+	{
+		return false;
+	}
+
+	return chg_stat == MP2733_DONE || battery_mv >= BATTERY_FULL_MV;
+}
+
 static int battery_poll_once(struct controller_battery_report *report)
 {
 	uint8_t raw[8];
 	enum mp2733_chg_stat chg_stat;
-	bool vin_stat;
+	uint8_t vin_stat;
 	int err;
 
 	if(!i2c_is_ready_dt(&mp2733))
@@ -137,6 +150,7 @@ static int battery_poll_once(struct controller_battery_report *report)
 	report->input_current_ma = ((uint32_t)13300U * raw[7]) / 1000U;
 	report->level_percent = mp2733_level_from_voltage(report->battery_mv);
 	report->charger_type = vin_stat;
+	report->charge_complete = mp2733_charge_complete(chg_stat, vin_stat, report->battery_mv);
 	report->valid = true;
 	return 0;
 }
@@ -147,6 +161,30 @@ static void battery_publish(const struct controller_battery_report *report)
 	(void)bt_bas_set_battery_level(report->level_percent);
 #endif
 	(void)transport_send_battery_status(report);
+}
+
+int battery_read_fresh_status(struct controller_battery_report *report)
+{
+	int err;
+
+	if(report == NULL)
+	{
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&battery_lock, K_FOREVER);
+	err = battery_poll_once(report);
+	if(!err)
+	{
+		cached_report = *report;
+	}
+	k_mutex_unlock(&battery_lock);
+	if(err)
+	{
+		return err;
+	}
+
+	return 0;
 }
 
 static void battery_thread_entry(void *p1, void *p2, void *p3)
@@ -160,7 +198,7 @@ static void battery_thread_entry(void *p1, void *p2, void *p3)
 	for(;;)
 	{
 		struct controller_battery_report report;
-		int err = battery_poll_once(&report);
+		int err = battery_read_fresh_status(&report);
 
 		if(err)
 		{
@@ -168,9 +206,6 @@ static void battery_thread_entry(void *p1, void *p2, void *p3)
 		}
 		else
 		{
-			k_mutex_lock(&battery_lock, K_FOREVER);
-			cached_report = report;
-			k_mutex_unlock(&battery_lock);
 			battery_publish(&report);
 			LOG_INF("%u%% %umV state=%s input=%umV ichg=%umA type=%u", report.level_percent,
 			        report.battery_mv, battery_charge_state_name(report.charge_state),
@@ -234,6 +269,17 @@ const char *battery_charge_state_name(uint8_t charge_state)
 
 int battery_init(void)
 {
+	return -ENODEV;
+}
+
+int battery_read_fresh_status(struct controller_battery_report *report)
+{
+	if(report == NULL)
+	{
+		return -EINVAL;
+	}
+
+	memset(report, 0, sizeof(*report));
 	return -ENODEV;
 }
 
