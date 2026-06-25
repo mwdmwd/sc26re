@@ -22,8 +22,12 @@ LOG_MODULE_REGISTER(battery);
 
 #define MP2733_REG_CONVERTER_CTRL_A 0x03
 #define MP2733_REG_CONVERTER_CTRL_B 0x08
+#define MP2733_REG_CHARGE_VOLTAGE 0x07
 #define MP2733_REG_STATUS_BASE 0x0c
 #define MP2733_ADC_ENABLE BIT(6)
+#define MP2733_VBATT_REG_OFFSET_MV 3400
+#define MP2733_VBATT_REG_STEP_MV 10
+#define MP2733_VBATT_REG_MAX_MV 4670
 #define MP2733_VIN_STAT_SHIFT 5
 #define MP2733_VIN_STAT_MASK 0x07
 enum mp2733_chg_stat
@@ -63,6 +67,19 @@ static int mp2733_update_reg(uint8_t reg, uint8_t set_mask, uint8_t clear_mask)
 
 	value = (value | set_mask) & ~clear_mask;
 	return i2c_reg_write_byte_dt(&mp2733, reg, value);
+}
+
+static int mp2733_write_vbat_reg(uint16_t mv)
+{
+	uint8_t value;
+
+	if(mv < MP2733_VBATT_REG_OFFSET_MV || mv > MP2733_VBATT_REG_MAX_MV)
+	{
+		return -EINVAL;
+	}
+
+	value = (uint8_t)(((mv - MP2733_VBATT_REG_OFFSET_MV) / MP2733_VBATT_REG_STEP_MV) << 1);
+	return i2c_reg_write_byte_dt(&mp2733, MP2733_REG_CHARGE_VOLTAGE, value);
 }
 
 static uint8_t mp2733_level_from_voltage(uint16_t mv)
@@ -218,12 +235,20 @@ static void battery_thread_entry(void *p1, void *p2, void *p3)
 
 int battery_init(void)
 {
+	int err;
+
 	k_mutex_init(&battery_lock);
 
 	if(!i2c_is_ready_dt(&mp2733))
 	{
 		LOG_WRN("MP2733 I2C bus is not ready");
 		return -ENODEV;
+	}
+
+	err = mp2733_write_vbat_reg(BATTERY_FULL_MV);
+	if(err)
+	{
+		LOG_WRN("MP2733 charge voltage setup failed: %d", err);
 	}
 
 	k_thread_create(&battery_thread, battery_stack, K_THREAD_STACK_SIZEOF(battery_stack),
