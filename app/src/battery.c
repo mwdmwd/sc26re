@@ -43,16 +43,70 @@ enum mp2733_chg_stat
 #define BATTERY_POLL_PERIOD_MS 30000
 #define BATTERY_INITIAL_POLL_DELAY_MS 500
 #define BATTERY_ADC_SETTLE_MS 164
-#define BATTERY_EMPTY_MV 3400
-/* "full": LED turns off when charging, "SoC100": scale for charge level */
 #define BATTERY_FULL_MV 4120
-#define BATTERY_SOC100_MV 4200
+#define MP2733_SOC_SCALE 1000000LL
+
+struct mp2733_soc_segment
+{
+	uint16_t threshold_mv;
+	int32_t slope;
+	int32_t intercept;
+};
+
+/* clang-format on
+ * ^ this directive suppresses formatting for this comment only
+ *
+ * Generated with:
+ * python3 -c 'import pathlib,struct;d=pathlib.Path("IBEX_FW_69FE17FF.fw.payload.bin").read_bytes();b=0x8000;[print(n+"\n"+"\n".join(f"{{ {round(v*1000)}, {round(m*1000000)}, {round(c*1000000)} }},"for v,m,c in struct.iter_unpack("<fff",d[a-b:a-b+l*12])))for n,a,l in(("charge",0x5b6b4,16),("discharge",0x5b774,13))]'
+ *
+ * the multiplier must match the MP2733_SOC_SCALE constant above
+ */
+static const struct mp2733_soc_segment mp2733_charge_curve[] = {
+	{ 3545, 0, 0 },
+	{ 3766, 125873, -473989 },
+	{ 3804, 3610806, -13729670 },
+	{ 3822, 1864111, -7053337 },
+	{ 3865, 3249592, -12408002 },
+	{ 3907, 4376704, -16811445 },
+	{ 3928, 2723910, -10320033 },
+	{ 3966, 2140409, -8005860 },
+	{ 3981, 1197510, -4252494 },
+	{ 4054, 1441182, -5240413 },
+	{ 4107, 1255132, -4476263 },
+	{ 4209, 1073036, -3709823 },
+	{ 4325, 1932818, -7428214 },
+	{ 4340, 4824315, -19977425 },
+	{ 4345, 7921407, -33434048 },
+	{ 4347, 386755, -681853 },
+};
+
+static const struct mp2733_soc_segment mp2733_discharge_curve[] = {
+	{ 3666, 0, 0 },
+	{ 3684, 1067181, -3912718 },
+	{ 3690, 5094007, -18748272 },
+	{ 3693, 7839416, -28878401 },
+	{ 3739, 1713558, -6256995 },
+	{ 3783, 2943625, -10855810 },
+	{ 3811, 3711445, -13760778 },
+	{ 3848, 2618301, -9595303 },
+	{ 3863, 2244718, -8157812 },
+	{ 3919, 1155642, -3950404 },
+	{ 4091, 1259872, -4358917 },
+	{ 4287, 1039723, -3458326 },
+	{ 4295, 112280, 517724 },
+};
+
+#define MP2733_CHARGE_CURVE_BASE_PERCENT 75
+#define MP2733_DISCHARGE_CURVE_BASE_PERCENT 83
 
 static const struct i2c_dt_spec mp2733 = I2C_DT_SPEC_GET(MP2733_NODE);
 static struct controller_battery_report cached_report;
 static struct k_mutex battery_lock;
 static K_THREAD_STACK_DEFINE(battery_stack, 1024);
 static struct k_thread battery_thread;
+
+static bool mp2733_charge_complete(enum mp2733_chg_stat chg_stat, uint8_t vin_stat,
+                                   uint16_t battery_mv);
 
 static int mp2733_update_reg(uint8_t reg, uint8_t set_mask, uint8_t clear_mask)
 {
@@ -82,18 +136,89 @@ static int mp2733_write_vbat_reg(uint16_t mv)
 	return i2c_reg_write_byte_dt(&mp2733, MP2733_REG_CHARGE_VOLTAGE, value);
 }
 
-static uint8_t mp2733_level_from_voltage(uint16_t mv)
+static int64_t div_round_closest_s64(int64_t numerator, int64_t denominator)
 {
-	if(mv <= BATTERY_EMPTY_MV)
+	if(numerator < 0)
+	{
+		return (numerator - denominator / 2) / denominator;
+	}
+	return (numerator + denominator / 2) / denominator;
+}
+
+static const struct mp2733_soc_segment *
+mp2733_select_lower_bound_segment(const struct mp2733_soc_segment *curve, size_t curve_count,
+                                  uint16_t mv)
+{
+	const struct mp2733_soc_segment *segment = &curve[0];
+
+	for(size_t i = 1; i < curve_count; ++i)
+	{
+		if(mv < curve[i].threshold_mv)
+		{
+			break;
+		}
+
+		segment = &curve[i];
+	}
+
+	return segment;
+}
+
+static const struct mp2733_soc_segment *
+mp2733_select_upper_bound_segment(const struct mp2733_soc_segment *curve, size_t curve_count,
+                                  uint16_t mv)
+{
+	for(size_t i = 0; i < curve_count; ++i)
+	{
+		if(mv <= curve[i].threshold_mv)
+		{
+			return &curve[i];
+		}
+	}
+
+	return &curve[curve_count - 1];
+}
+
+static uint8_t mp2733_percent_from_segment(const struct mp2733_soc_segment *segment,
+                                           uint8_t base_percent, uint16_t mv)
+{
+	int64_t millipercent = 100 * 1000;
+	int64_t line;
+
+	line = (int64_t)segment->slope * mv + (int64_t)segment->intercept * 1000LL;
+	millipercent = div_round_closest_s64(line * (200U - base_percent), MP2733_SOC_SCALE);
+
+	if(millipercent <= 0)
 	{
 		return 0;
 	}
-	if(mv >= BATTERY_SOC100_MV)
+	if(millipercent >= 100 * 1000)
 	{
 		return 100;
 	}
-	return (uint8_t)(((uint32_t)(mv - BATTERY_EMPTY_MV) * 100U) /
-	                 (BATTERY_SOC100_MV - BATTERY_EMPTY_MV));
+	return (uint8_t)((millipercent + 500) / 1000);
+}
+
+static uint8_t mp2733_level_from_voltage(uint16_t mv, enum mp2733_chg_stat chg_stat,
+                                         uint8_t vin_stat)
+{
+	const struct mp2733_soc_segment *segment;
+
+	if(mp2733_charge_complete(chg_stat, vin_stat, mv))
+	{
+		return 100;
+	}
+
+	/* OFW charge thresholds act as lower bounds; discharge thresholds act as upper bounds. */
+	if(chg_stat == MP2733_TRICKLE || chg_stat == MP2733_CONSTANT_CURRENT)
+	{
+		segment = mp2733_select_lower_bound_segment(mp2733_charge_curve,
+		                                            ARRAY_SIZE(mp2733_charge_curve), mv);
+		return mp2733_percent_from_segment(segment, MP2733_CHARGE_CURVE_BASE_PERCENT, mv);
+	}
+	segment = mp2733_select_upper_bound_segment(mp2733_discharge_curve,
+	                                            ARRAY_SIZE(mp2733_discharge_curve), mv);
+	return mp2733_percent_from_segment(segment, MP2733_DISCHARGE_CURVE_BASE_PERCENT, mv);
 }
 
 static uint8_t mp2733_charge_state(enum mp2733_chg_stat chg_stat, uint8_t vin_stat)
@@ -165,7 +290,7 @@ static int battery_poll_once(struct controller_battery_report *report)
 	report->input_mv = 60U * raw[5];
 	report->current_ma = mp2733_current_ma(raw[6]);
 	report->input_current_ma = ((uint32_t)13300U * raw[7]) / 1000U;
-	report->level_percent = mp2733_level_from_voltage(report->battery_mv);
+	report->level_percent = mp2733_level_from_voltage(report->battery_mv, chg_stat, vin_stat);
 	report->charger_type = vin_stat;
 	report->charge_complete = mp2733_charge_complete(chg_stat, vin_stat, report->battery_mv);
 	report->valid = true;
