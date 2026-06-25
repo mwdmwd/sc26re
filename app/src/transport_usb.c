@@ -40,6 +40,7 @@ static atomic_t input_busy;
 static atomic_t usb_attached;
 static atomic_t usb_configured;
 static atomic_t usb_suspended;
+static atomic_t usb_radio_off_mode;
 
 static void usb_unplug_poweroff_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(usb_unplug_poweroff_work, usb_unplug_poweroff_work_handler);
@@ -56,6 +57,11 @@ static bool usb_vbus_present(void)
 bool transport_usb_attached(void)
 {
 	return usb_vbus_present() || atomic_get(&usb_attached) != 0 || atomic_get(&usb_configured) != 0;
+}
+
+bool transport_usb_configured(void)
+{
+	return atomic_get(&usb_configured) != 0;
 }
 
 static bool usb_ready(void)
@@ -109,19 +115,19 @@ static void usb_status_cb(enum usb_dc_status_code status, const uint8_t *param)
 	{
 		case USB_DC_CONNECTED:
 			atomic_set(&usb_attached, 1);
-			usb_enter_mode();
 			break;
 		case USB_DC_CONFIGURED:
 			atomic_set(&usb_attached, 1);
 			atomic_set(&usb_configured, 1);
 			atomic_clear(&usb_suspended);
+			atomic_set(&usb_radio_off_mode, 1);
 			usb_enter_mode();
 			break;
 		case USB_DC_DISCONNECTED:
 			atomic_clear(&usb_attached);
 			atomic_clear(&usb_configured);
 			atomic_clear(&usb_suspended);
-			if(was_attached)
+			if(was_attached && atomic_cas(&usb_radio_off_mode, 1, 0))
 			{
 				usb_schedule_unplug_poweroff();
 			}
@@ -136,7 +142,6 @@ static void usb_status_cb(enum usb_dc_status_code status, const uint8_t *param)
 		case USB_DC_RESUME:
 			atomic_set(&usb_attached, 1);
 			atomic_clear(&usb_suspended);
-			usb_enter_mode();
 			break;
 		default:
 			break;

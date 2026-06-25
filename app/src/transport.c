@@ -15,6 +15,11 @@ __weak bool transport_usb_attached(void)
 	return false;
 }
 
+__weak bool transport_usb_configured(void)
+{
+	return false;
+}
+
 __weak void transport_ble_deactivate(void)
 {
 }
@@ -198,7 +203,7 @@ int transport_send(const struct controller_report *report)
 		if(!radio_debug_usb_allowed)
 		{
 			usb_err = transport_usb_send(report);
-			if(transport_usb_attached())
+			if(transport_usb_configured())
 			{
 				return usb_err;
 			}
@@ -246,7 +251,7 @@ int transport_send_battery_status(const struct controller_battery_report *report
 		if(!radio_debug_usb_allowed)
 		{
 			usb_err = transport_usb_send_battery_status(report);
-			if(transport_usb_attached())
+			if(transport_usb_configured())
 			{
 				return usb_err;
 			}
