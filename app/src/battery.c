@@ -21,13 +21,21 @@ LOG_MODULE_REGISTER(battery);
 #define MP2733_NODE DT_NODELABEL(mp2733)
 
 #define MP2733_REG_CONVERTER_CTRL_A 0x03
-#define MP2733_REG_CONVERTER_CTRL_B 0x08
+#define MP2733_REG_CHARGE_CURRENT 0x05
+#define MP2733_REG_PRECHARGE_TERMINATION 0x06
 #define MP2733_REG_CHARGE_VOLTAGE 0x07
+#define MP2733_REG_TIMER_CONFIGURATION 0x08
 #define MP2733_REG_STATUS_BASE 0x0c
 #define MP2733_ADC_ENABLE BIT(6)
 #define MP2733_VBATT_REG_OFFSET_MV 3400
 #define MP2733_VBATT_REG_STEP_MV 10
 #define MP2733_VBATT_REG_MAX_MV 4670
+/* IIN_LIM=200 mA, ICC=1720mA, IPRE=230mA, ITERM=120mA,
+ * watchdog off, termination and safety timer on.
+ * IIN_LIM can be raised to 500 mA depending on the power source, NYI */
+#define MP2733_CHARGE_CURRENT 0xa3
+#define MP2733_PRECHARGE_TERMINATION 0x20
+#define MP2733_TIMER_CONFIGURATION 0x85
 #define MP2733_VIN_STAT_SHIFT 5
 #define MP2733_VIN_STAT_MASK 0x07
 enum mp2733_chg_stat
@@ -123,17 +131,67 @@ static int mp2733_update_reg(uint8_t reg, uint8_t set_mask, uint8_t clear_mask)
 	return i2c_reg_write_byte_dt(&mp2733, reg, value);
 }
 
-static int mp2733_write_vbat_reg(uint16_t mv)
+static int mp2733_write_reg_verify(uint8_t reg, uint8_t value)
 {
-	uint8_t value;
+	uint8_t actual;
+	int err;
 
+	err = i2c_reg_write_byte_dt(&mp2733, reg, value);
+	if(err)
+	{
+		return err;
+	}
+
+	err = i2c_reg_read_byte_dt(&mp2733, reg, &actual);
+	if(err)
+	{
+		return err;
+	}
+
+	return actual == value ? 0 : -EIO;
+}
+
+static int mp2733_vbat_reg_value(uint16_t mv, uint8_t *value)
+{
 	if(mv < MP2733_VBATT_REG_OFFSET_MV || mv > MP2733_VBATT_REG_MAX_MV)
 	{
 		return -EINVAL;
 	}
 
-	value = (uint8_t)(((mv - MP2733_VBATT_REG_OFFSET_MV) / MP2733_VBATT_REG_STEP_MV) << 1);
-	return i2c_reg_write_byte_dt(&mp2733, MP2733_REG_CHARGE_VOLTAGE, value);
+	*value = (uint8_t)(((mv - MP2733_VBATT_REG_OFFSET_MV) / MP2733_VBATT_REG_STEP_MV) << 1);
+	return 0;
+}
+
+static int mp2733_configure_charger(uint16_t full_mv)
+{
+	uint8_t value;
+	int err;
+
+	err = mp2733_vbat_reg_value(full_mv, &value);
+	if(err)
+	{
+		return err;
+	}
+
+	err = mp2733_write_reg_verify(MP2733_REG_CHARGE_VOLTAGE, value);
+	if(err)
+	{
+		return err;
+	}
+
+	err = mp2733_write_reg_verify(MP2733_REG_CHARGE_CURRENT, MP2733_CHARGE_CURRENT);
+	if(err)
+	{
+		return err;
+	}
+
+	err = mp2733_write_reg_verify(MP2733_REG_PRECHARGE_TERMINATION, MP2733_PRECHARGE_TERMINATION);
+	if(err)
+	{
+		return err;
+	}
+
+	return mp2733_write_reg_verify(MP2733_REG_TIMER_CONFIGURATION, MP2733_TIMER_CONFIGURATION);
 }
 
 static int64_t div_round_closest_s64(int64_t numerator, int64_t denominator)
@@ -265,11 +323,11 @@ static int battery_poll_once(struct controller_battery_report *report)
 		return -ENODEV;
 	}
 
-	err = mp2733_update_reg(MP2733_REG_CONVERTER_CTRL_B, MP2733_ADC_ENABLE, 0);
+	err = mp2733_update_reg(MP2733_REG_TIMER_CONFIGURATION, MP2733_ADC_ENABLE, 0);
 	err |= mp2733_update_reg(MP2733_REG_CONVERTER_CTRL_A, MP2733_ADC_ENABLE, 0);
 	k_msleep(BATTERY_ADC_SETTLE_MS);
 	err |= mp2733_update_reg(MP2733_REG_CONVERTER_CTRL_A, 0, MP2733_ADC_ENABLE);
-	err |= mp2733_update_reg(MP2733_REG_CONVERTER_CTRL_B, 0, MP2733_ADC_ENABLE);
+	err |= mp2733_update_reg(MP2733_REG_TIMER_CONFIGURATION, 0, MP2733_ADC_ENABLE);
 	if(err)
 	{
 		return err;
@@ -370,10 +428,11 @@ int battery_init(void)
 		return -ENODEV;
 	}
 
-	err = mp2733_write_vbat_reg(BATTERY_FULL_MV);
+	err = mp2733_configure_charger(BATTERY_FULL_MV);
 	if(err)
 	{
-		LOG_WRN("MP2733 charge voltage setup failed: %d", err);
+		LOG_WRN("MP2733 charger setup failed: %d", err);
+		return err;
 	}
 
 	k_thread_create(&battery_thread, battery_stack, K_THREAD_STACK_SIZEOF(battery_stack),

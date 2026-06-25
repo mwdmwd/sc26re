@@ -32,6 +32,7 @@ The most glaring omissions are gyro, haptics, battery/charger handling, and grip
 
 - [x] Olympus touchpad
   - [ ] Exactly OFW-matching pressure/click/deadzone behavior
+  - [ ] External power compensation (some parameter is changed when power is plugged in)
 - [x] Analog inputs
   - [ ] Trigger neutral deadzone seems too large
 - [x] Buttons
@@ -41,8 +42,9 @@ The most glaring omissions are gyro, haptics, battery/charger handling, and grip
   - [x] Power-button long-hold system-off path
   - [x] Sleep mode
     - [ ] Verify that idle power consumption matches OFW
-  - [ ] Battery level
+  - [x] Battery level
   - [ ] Charger detection
+  - [ ] Adjust charger settings based on power source
 - [ ] LEDs
   - [x] RGBW LED
   - [ ] IR LED
