@@ -41,6 +41,7 @@ config IBEX_BLE
 	bool "Bluetooth LE HID transport"
 	default y
 	depends on BT && SC26RE_ALLOW_NORDIC_NONFREE
+	select BT_GATT_CLIENT
 	help
 	  Include the NCS Bluetooth HID transport for BLE support.
 

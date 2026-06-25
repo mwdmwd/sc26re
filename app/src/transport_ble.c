@@ -374,6 +374,24 @@ static int set_ble_identity_strings(void)
 	return 0;
 }
 
+static void ble_mtu_exchange_cb(struct bt_conn *conn, uint8_t err,
+                                struct bt_gatt_exchange_params *params)
+{
+	ARG_UNUSED(params);
+
+	if(err)
+	{
+		LOG_WRN("ATT MTU exchange failed: 0x%02x", err);
+		return;
+	}
+
+	LOG_DBG("ATT MTU exchanged: %u", bt_gatt_get_mtu(conn));
+}
+
+static struct bt_gatt_exchange_params mtu_exchange_params = {
+	.func = ble_mtu_exchange_cb,
+};
+
 /*
  * Request fast connection parameters as soon as a central connects.
  * The default connection interval chosen by Linux/BlueZ is typically
@@ -411,6 +429,12 @@ static void ble_connected_cb(struct bt_conn *conn, uint8_t err)
 	else
 	{
 		LOG_INF("requested CI 7.5-15 ms");
+	}
+
+	ret = bt_gatt_exchange_mtu(conn, &mtu_exchange_params);
+	if(ret)
+	{
+		LOG_WRN("ATT MTU exchange request failed: %d", ret);
 	}
 }
 
