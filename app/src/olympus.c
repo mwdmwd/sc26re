@@ -114,15 +114,26 @@ static int32_t pad_click_threshold(bool right)
 	           OLYMPUS_PAD_CLICK_PRESSURE);
 }
 
-BUILD_ASSERT(sizeof(olympus_block_512) == 5 * 26);
-BUILD_ASSERT(sizeof(olympus_block_511) == 9 * 41);
-BUILD_ASSERT(sizeof(olympus_block_515) == 9 * 9);
-BUILD_ASSERT(sizeof(olympus_block_516) == 9 * 7);
-BUILD_ASSERT(sizeof(olympus_block_517) == 2 * 136);
-BUILD_ASSERT(sizeof(olympus_block_518) == 16 * 6);
-BUILD_ASSERT(sizeof(olympus_block_519) == 1 * 4);
-BUILD_ASSERT(sizeof(olympus_block_51a) == 20 * 6);
-BUILD_ASSERT(sizeof(olympus_block_51b) == 1 * 2);
+BUILD_ASSERT(sizeof(struct olympus_global_config) == 7);
+BUILD_ASSERT(sizeof(struct olympus_group_config) == 26);
+BUILD_ASSERT(sizeof(struct olympus_measurement_config) == 41);
+BUILD_ASSERT(sizeof(struct olympus_noise_config) == 9);
+BUILD_ASSERT(sizeof(struct olympus_unk516_config) == 7);
+BUILD_ASSERT(sizeof(struct olympus_channel_reference) == 2);
+BUILD_ASSERT(sizeof(struct olympus_result_map) == 136);
+BUILD_ASSERT(sizeof(struct olympus_compensation_slot) == 6);
+BUILD_ASSERT(sizeof(struct olympus_unk519_config) == 4);
+BUILD_ASSERT(sizeof(struct olympus_result_route) == 6);
+BUILD_ASSERT(sizeof(struct olympus_u16_config) == 2);
+BUILD_ASSERT(sizeof(olympus_group_configs) == 5 * 26);
+BUILD_ASSERT(sizeof(olympus_measurement_configs) == 9 * 41);
+BUILD_ASSERT(sizeof(olympus_noise_configs) == 9 * 9);
+BUILD_ASSERT(sizeof(olympus_unk516_configs) == 9 * 7);
+BUILD_ASSERT(sizeof(olympus_result_maps) == 2 * 136);
+BUILD_ASSERT(sizeof(olympus_compensation_slots) == 16 * 6);
+BUILD_ASSERT(sizeof(olympus_unk519_configs) == 1 * 4);
+BUILD_ASSERT(sizeof(olympus_result_routes) == 20 * 6);
+BUILD_ASSERT(sizeof(olympus_result_route_limits) == 1 * 2);
 
 static uint8_t checksum(const uint8_t *data, size_t size)
 {
@@ -190,21 +201,22 @@ static int olympus_read_register(uint32_t address, uint8_t *data, uint8_t size)
 
 static int olympus_apply_factory_config(void)
 {
-	uint8_t activation[sizeof(olympus_activate)];
-	uint8_t scan_config[26];
+	struct olympus_global_config activation;
+	struct olympus_group_config group_config;
 	int err;
 
 	/*
 	 * The normal factory path disables an already-running device before
 	 * replacing its configuration.
 	 */
-	err = olympus_read_register(0x51000000, activation, sizeof(activation));
+	err = olympus_read_register(OLYMPUS_GLOBAL_BASE, (uint8_t *)&activation, sizeof(activation));
 	if(err)
 	{
 		return err;
 	}
-	activation[0] = 0;
-	err = olympus_write_register(0x51000000, activation, sizeof(activation));
+	activation.enable = 0;
+	err = olympus_write_register(OLYMPUS_GLOBAL_BASE, (const uint8_t *)&activation,
+	                             sizeof(activation));
 	if(err)
 	{
 		return err;
@@ -216,7 +228,7 @@ static int olympus_apply_factory_config(void)
 
 		for(uint16_t record = 0; record < block->count; ++record)
 		{
-			err = olympus_write_register(block->base + (uint32_t)record * 0x1000,
+			err = olympus_write_register(block->base + (uint32_t)record * OLYMPUS_RECORD_STRIDE,
 			                             &block->data[record * block->record_size],
 			                             block->record_size);
 
@@ -230,27 +242,28 @@ static int olympus_apply_factory_config(void)
 	}
 
 	/*
-	 * Valve's normal-mode post-pass enables each of the five 0x512 scan
-	 * records by setting bit 0x40 in byte 1 after reading it back.
+	 * Valve's normal-mode post-pass reads each group config back and sets
+	 * the request-calibration flag before starting measurements.
 	 */
-	for(uint32_t record = 0; record < 5; ++record)
+	for(uint32_t record = 0; record < ARRAY_SIZE(olympus_group_configs); ++record)
 	{
-		uint32_t address = 0x51200000 + record * 0x1000;
+		uint32_t address = OLYMPUS_GROUP_BASE + record * OLYMPUS_RECORD_STRIDE;
 
-		err = olympus_read_register(address, scan_config, sizeof(scan_config));
+		err = olympus_read_register(address, (uint8_t *)&group_config, sizeof(group_config));
 		if(err)
 		{
 			return err;
 		}
-		scan_config[1] |= 0x40;
-		err = olympus_write_register(address, scan_config, sizeof(scan_config));
+		group_config.calibration_flags |= OLYMPUS_GROUP_REQUEST_CALIBRATION;
+		err = olympus_write_register(address, (const uint8_t *)&group_config, sizeof(group_config));
 		if(err)
 		{
 			return err;
 		}
 	}
 
-	return olympus_write_register(0x51000000, olympus_activate, sizeof(olympus_activate));
+	return olympus_write_register(OLYMPUS_GLOBAL_BASE, (const uint8_t *)&olympus_active_config,
+	                              sizeof(olympus_active_config));
 }
 
 static int olympus_check_descriptor(void)
