@@ -103,17 +103,21 @@ int hardware_haptic_tone(uint32_t frequency_hz, uint32_t duration_ms);
 int transport_init(void);
 int transport_send(const struct controller_report *report);
 int transport_send_battery_status(const struct controller_battery_report *report);
-bool transport_usb_attached(void);
-int transport_radio_debug_allow_usb(bool allow);
-bool transport_radio_debug_usb_allowed(void);
 
+#define TRANSPORT_BLE_ID_ALL UINT8_MAX
 int transport_ble_init(void);
 int transport_ble_send(const struct controller_report *report);
 int transport_ble_send_battery_status(const struct controller_battery_report *report);
 void transport_ble_deactivate(void);
+int transport_ble_clear_bonds(uint8_t id);
+
+bool transport_usb_attached(void);
+int transport_radio_debug_allow_usb(bool allow);
+bool transport_radio_debug_usb_allowed(void);
 int transport_usb_init(void);
 int transport_usb_send(const struct controller_report *report);
 int transport_usb_send_battery_status(const struct controller_battery_report *report);
+
 int transport_esb_init(void);
 int transport_esb_send(const struct controller_report *report);
 int transport_esb_send_battery_status(const struct controller_battery_report *report);

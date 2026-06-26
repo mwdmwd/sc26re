@@ -24,6 +24,13 @@ __weak void transport_ble_deactivate(void)
 {
 }
 
+__weak int transport_ble_clear_bonds(uint8_t id)
+{
+	ARG_UNUSED(id);
+
+	return -ENOTSUP;
+}
+
 __weak void transport_esb_deactivate(void)
 {
 }

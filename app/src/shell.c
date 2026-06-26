@@ -287,6 +287,46 @@ static int cmd_radio_ble_disconnect(const struct shell *shell, size_t argc, char
 	shell_print(shell, "BLE transport disconnected/deactivated");
 	return 0;
 }
+
+static int cmd_radio_ble_unpair(const struct shell *shell, size_t argc, char **argv)
+{
+	uint8_t id = TRANSPORT_BLE_ID_ALL;
+	int err;
+
+	if(argc > 1)
+	{
+		uint32_t parsed_id;
+
+		if(strcmp(argv[1], "all") != 0)
+		{
+			err = 0;
+			parsed_id = shell_strtoul(argv[1], 10, &err);
+			if(err || parsed_id > UINT8_MAX)
+			{
+				shell_error(shell, "BLE identity must be 0..%u or all", UINT8_MAX);
+				return -EINVAL;
+			}
+			id = (uint8_t)parsed_id;
+		}
+	}
+
+	err = transport_ble_clear_bonds(id);
+	if(err)
+	{
+		shell_error(shell, "BLE bond clear failed: %d", err);
+		return err;
+	}
+
+	if(id == TRANSPORT_BLE_ID_ALL)
+	{
+		shell_print(shell, "BLE bonds cleared");
+	}
+	else
+	{
+		shell_print(shell, "BLE bonds cleared for identity %u", id);
+	}
+	return 0;
+}
 #endif
 
 static int cmd_settings_get(const struct shell *shell, size_t argc, char **argv)
@@ -489,6 +529,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
     SHELL_CMD(ble, NULL, "Reboot into BLE personality", cmd_radio_ble),
     SHELL_CMD(ble_disconnect, NULL, "Disconnect/deactivate BLE without rebooting",
               cmd_radio_ble_disconnect),
+    SHELL_CMD_ARG(ble_unpair, NULL, "Clear BLE bonds [identity]", cmd_radio_ble_unpair, 1, 1),
 #endif
     SHELL_CMD(esb, NULL, "Reboot into ESB personality", cmd_radio_esb),
     SHELL_CMD_ARG(esb_bond, NULL, "Provision ESB bond <proteus_uuid> <ibex_uuid> [serial]",

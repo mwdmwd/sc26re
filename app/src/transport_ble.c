@@ -34,6 +34,9 @@ LOG_MODULE_REGISTER(transport_ble);
 #define VALVE_HAPTIC_PCM_STEREO_REPORT 0x88
 #define VALVE_HAPTIC_PCM_STEREO_SAMPLES 31
 
+BUILD_ASSERT(CONFIG_BT_ID_MAX >= VALVE_IDENTITY_COUNT,
+             "CONFIG_BT_ID_MAX must be at least as large as VALVE_IDENTITY_COUNT");
+
 enum
 {
 	HIDS_INPUT = 0x01,
@@ -333,6 +336,7 @@ static int select_valve_identity(uint8_t *selected_id)
 		identity_count++;
 	}
 
+	memset(identity_has_bond, 0, sizeof(identity_has_bond));
 	for(uint8_t id = 1; id < VALVE_IDENTITY_COUNT; ++id)
 	{
 		bt_foreach_bond(id, remember_bond, &identity_has_bond[id]);
@@ -348,6 +352,79 @@ static int select_valve_identity(uint8_t *selected_id)
 	LOG_INF("no existing Valve-style bond; using Bluetooth identity 1");
 	return 0;
 }
+
+#if defined(CONFIG_BT_SMP)
+static void ble_pairing_complete_cb(struct bt_conn *conn, bool bonded)
+{
+	struct bt_conn_info info;
+
+	if(bt_conn_get_info(conn, &info) == 0)
+	{
+		LOG_DBG("pairing complete: id=%u bonded=%u", info.id, bonded);
+	}
+	else
+	{
+		LOG_DBG("pairing complete: bonded=%u", bonded);
+	}
+}
+
+static void ble_pairing_failed_cb(struct bt_conn *conn, enum bt_security_err reason)
+{
+	struct bt_conn_info info;
+
+	if(bt_conn_get_info(conn, &info) == 0)
+	{
+		LOG_WRN("pairing failed: id=%u reason=%u (%s)", info.id, reason,
+		        bt_security_err_to_str(reason));
+	}
+	else
+	{
+		LOG_WRN("pairing failed: reason=%u (%s)", reason, bt_security_err_to_str(reason));
+	}
+}
+
+static void ble_bond_deleted_cb(uint8_t id, const bt_addr_le_t *peer)
+{
+	ARG_UNUSED(peer);
+
+	if(id < ARRAY_SIZE(identity_has_bond))
+	{
+		identity_has_bond[id] = false;
+	}
+	LOG_INF("BLE bond deleted: id=%u", id);
+}
+
+static struct bt_conn_auth_info_cb ble_auth_info_cb = {
+	.pairing_complete = ble_pairing_complete_cb,
+	.pairing_failed = ble_pairing_failed_cb,
+	.bond_deleted = ble_bond_deleted_cb,
+};
+
+static int register_auth_info_callbacks(void)
+{
+	static bool auth_info_registered;
+	int err;
+
+	if(auth_info_registered)
+	{
+		return 0;
+	}
+
+	err = bt_conn_auth_info_cb_register(&ble_auth_info_cb);
+	if(err && err != -EALREADY)
+	{
+		return err;
+	}
+
+	auth_info_registered = true;
+	return 0;
+}
+#else
+static int register_auth_info_callbacks(void)
+{
+	return 0;
+}
+#endif
 
 static int set_ble_identity_strings(void)
 {
@@ -445,6 +522,35 @@ static void ble_param_updated_cb(struct bt_conn *conn, uint16_t interval, uint16
 	        (interval * 125) % 100, latency, timeout);
 }
 
+#if defined(CONFIG_BT_SMP)
+static void ble_security_changed_cb(struct bt_conn *conn, bt_security_t level,
+                                    enum bt_security_err err)
+{
+	struct bt_conn_info info;
+
+	if(bt_conn_get_info(conn, &info) == 0)
+	{
+		if(err)
+		{
+			LOG_WRN("security failed: id=%u level=%u err=%u (%s)", info.id, level, err,
+			        bt_security_err_to_str(err));
+		}
+		else
+		{
+			LOG_DBG("security changed: id=%u level=%u", info.id, level);
+		}
+	}
+	else if(err)
+	{
+		LOG_WRN("security failed: level=%u err=%u (%s)", level, err, bt_security_err_to_str(err));
+	}
+	else
+	{
+		LOG_DBG("security changed: level=%u", level);
+	}
+}
+#endif
+
 static void ble_disconnected_cb(struct bt_conn *conn, uint8_t reason)
 {
 	LOG_INF("disconnected (reason 0x%02x)", reason);
@@ -462,6 +568,9 @@ BT_CONN_CB_DEFINE(ble_conn_cbs) = {
 	.connected = ble_connected_cb,
 	.disconnected = ble_disconnected_cb,
 	.le_param_updated = ble_param_updated_cb,
+#if defined(CONFIG_BT_SMP)
+	.security_changed = ble_security_changed_cb,
+#endif
 };
 
 int transport_ble_init(void)
@@ -481,6 +590,12 @@ int transport_ble_init(void)
 
 	err = bt_enable(NULL);
 	if(err && err != -EALREADY)
+	{
+		return err;
+	}
+
+	err = register_auth_info_callbacks();
+	if(err)
 	{
 		return err;
 	}
@@ -516,6 +631,51 @@ int transport_ble_init(void)
 	if(!err)
 	{
 		ble_started = true;
+	}
+	return err;
+}
+
+int transport_ble_clear_bonds(uint8_t id)
+{
+	int err = 0;
+
+	if(!IS_ENABLED(CONFIG_BT_SMP))
+	{
+		return -ENOTSUP;
+	}
+
+	if(!ble_started)
+	{
+		return -ENOTCONN;
+	}
+
+	if(id == TRANSPORT_BLE_ID_ALL)
+	{
+		for(uint8_t valve_id = 1; valve_id < VALVE_IDENTITY_COUNT; ++valve_id)
+		{
+			int unpair_err = bt_unpair(valve_id, NULL);
+
+			if(unpair_err && err == 0)
+			{
+				err = unpair_err;
+			}
+			else if(!unpair_err)
+			{
+				identity_has_bond[valve_id] = false;
+			}
+		}
+		return err;
+	}
+
+	if(id >= CONFIG_BT_ID_MAX)
+	{
+		return -EINVAL;
+	}
+
+	err = bt_unpair(id, NULL);
+	if(!err)
+	{
+		identity_has_bond[id] = false;
 	}
 	return err;
 }
