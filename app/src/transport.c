@@ -8,6 +8,7 @@
 
 LOG_MODULE_REGISTER(transport);
 
+static bool radio_usb_allowed;
 static bool radio_debug_usb_allowed;
 
 __weak bool transport_usb_attached(void)
@@ -148,11 +149,19 @@ static int transport_start_radio(void)
 	return 0;
 }
 
-int transport_radio_debug_allow_usb(bool allow)
+static int transport_set_radio_usb_allowed(bool allow, bool diagnostic)
 {
+	bool *state = diagnostic ? &radio_debug_usb_allowed : &radio_usb_allowed;
+	bool was_allowed;
 	int err = 0;
 
-	radio_debug_usb_allowed = allow;
+	if(*state == allow)
+	{
+		return 0;
+	}
+
+	was_allowed = radio_usb_allowed || radio_debug_usb_allowed;
+	*state = allow;
 	if(!transport_usb_attached())
 	{
 		return 0;
@@ -160,17 +169,48 @@ int transport_radio_debug_allow_usb(bool allow)
 
 	if(allow)
 	{
-		LOG_WRN("diagnostic mode: allowing radio while USB is attached; "
-		        "USB HID reports suppressed");
+		if(diagnostic)
+		{
+			LOG_WRN("diagnostic mode: allowing radio while USB is attached; "
+			        "USB HID reports suppressed");
+		}
+		else
+		{
+			LOG_INF("allowing radio while charger VBUS is attached");
+		}
 		err = transport_start_radio();
+		if(err)
+		{
+			*state = false;
+		}
 	}
 	else
 	{
-		LOG_INF("USB radio diagnostic mode disabled");
-		transport_ble_deactivate();
-		transport_esb_deactivate();
+		if(diagnostic)
+		{
+			LOG_INF("USB radio diagnostic mode disabled");
+		}
+		else
+		{
+			LOG_INF("USB radio mode disabled");
+		}
+		if(was_allowed && !radio_usb_allowed && !radio_debug_usb_allowed)
+		{
+			transport_ble_deactivate();
+			transport_esb_deactivate();
+		}
 	}
 	return err;
+}
+
+int transport_allow_radio_with_usb(bool allow)
+{
+	return transport_set_radio_usb_allowed(allow, false);
+}
+
+int transport_radio_debug_allow_usb(bool allow)
+{
+	return transport_set_radio_usb_allowed(allow, true);
 }
 
 bool transport_radio_debug_usb_allowed(void)
@@ -189,7 +229,7 @@ int transport_init(void)
 		{
 			return err;
 		}
-		if(transport_usb_attached() && !radio_debug_usb_allowed)
+		if(transport_usb_attached() && !radio_usb_allowed && !radio_debug_usb_allowed)
 		{
 			LOG_INF("USB attached; leaving radio transports inactive");
 			return 0;

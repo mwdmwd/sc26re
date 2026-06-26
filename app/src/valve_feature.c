@@ -126,6 +126,8 @@ static const char *feature_link_name(enum valve_feature_link link)
 			return "ble";
 		case VALVE_FEATURE_LINK_ESB:
 			return "esb";
+		case VALVE_FEATURE_LINK_PUCK:
+			return "puck";
 		default:
 			return "?";
 	}
@@ -231,6 +233,7 @@ static void prepare_device_attributes(enum valve_feature_link link, uint8_t **cu
 			break;
 		case VALVE_FEATURE_LINK_BLE:
 		case VALVE_FEATURE_LINK_ESB:
+		case VALVE_FEATURE_LINK_PUCK:
 		default:
 			append_numeric_attr(cursor, 1, VALVE_USB_PRODUCT_ID);
 			append_numeric_attr(cursor, 2, 0);
@@ -610,6 +613,7 @@ static size_t feature_response_min_capacity(enum valve_feature_link link)
 	switch(link)
 	{
 		case VALVE_FEATURE_LINK_USB:
+		case VALVE_FEATURE_LINK_PUCK:
 			return VALVE_FEATURE_REPORT_SIZE - 1;
 		case VALVE_FEATURE_LINK_BLE:
 		case VALVE_FEATURE_LINK_ESB:

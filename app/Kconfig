@@ -61,6 +61,14 @@ config IBEX_USB_CDC_ONLY
 	  over USB, with no Valve HID interface. This keeps Steam from opening
 	  the USB controller while the shell can be used over the USB cable.
 
+config IBEX_PUCK_INTERFACE
+	bool "Ibex puck UART interface"
+	default y if BOARD_STEAM_CONTROLLER_IBEX
+	depends on BOARD_STEAM_CONTROLLER_IBEX && SERIAL
+	select UART_INTERRUPT_DRIVEN
+	help
+	  Service the Ibex charging puck UART protocol on UARTE0.
+
 config IBEX_ESB
 	bool "Enhanced ShockBurst transport (puck support)"
 	default n

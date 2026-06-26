@@ -37,6 +37,7 @@ static uint8_t feature_response[VALVE_FEATURE_REPORT_SIZE];
 static uint8_t input_report[1 + VALVE_INPUT_42_SIZE];
 static uint8_t battery_report[1 + VALVE_INPUT_43_SIZE];
 static atomic_t input_busy;
+static atomic_t usb_initialized;
 static atomic_t usb_attached;
 static atomic_t usb_configured;
 static atomic_t usb_suspended;
@@ -83,13 +84,20 @@ static void usb_enter_mode(void)
 {
 	usb_cancel_unplug_poweroff();
 	radio_personality_cancel_pending_persist();
+	(void)transport_allow_radio_with_usb(false);
 
 #if CONFIG_IBEX_RGBW_LED
-	rgbw_led_set(0, 255, 0, 0);
+	if(transport_usb_configured())
+	{
+		rgbw_led_set(0, 255, 0, 0);
+	}
 #endif
 
-	transport_ble_deactivate();
-	transport_esb_deactivate();
+	if(!transport_radio_debug_usb_allowed())
+	{
+		transport_ble_deactivate();
+		transport_esb_deactivate();
+	}
 }
 
 static void usb_unplug_poweroff_work_handler(struct k_work *work)
@@ -225,6 +233,11 @@ int transport_usb_init(void)
 {
 	int err;
 
+	if(atomic_get(&usb_initialized) != 0)
+	{
+		return 0;
+	}
+
 	hid_dev = device_get_binding("HID_0");
 	if(hid_dev == NULL)
 	{
@@ -247,6 +260,7 @@ int transport_usb_init(void)
 		return err;
 	}
 
+	atomic_set(&usb_initialized, 1);
 	LOG_INF("USB HID enabled alongside CDC-ACM");
 	return 0;
 }

@@ -43,7 +43,7 @@ The most glaring omissions are gyro, haptics, battery/charger handling, and grip
   - [x] Sleep mode
     - [ ] Verify that idle power consumption matches OFW
   - [x] Battery level
-  - [ ] Charger detection
+  - [x] Charger detection
   - [ ] Adjust charger settings based on power source
 - [ ] LEDs
   - [x] RGBW LED

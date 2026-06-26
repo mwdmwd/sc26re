@@ -112,6 +112,8 @@ void transport_ble_deactivate(void);
 int transport_ble_clear_bonds(uint8_t id);
 
 bool transport_usb_attached(void);
+bool transport_usb_configured(void);
+int transport_allow_radio_with_usb(bool allow);
 int transport_radio_debug_allow_usb(bool allow);
 bool transport_radio_debug_usb_allowed(void);
 int transport_usb_init(void);

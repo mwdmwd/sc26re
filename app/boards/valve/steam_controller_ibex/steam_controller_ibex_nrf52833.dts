@@ -276,7 +276,7 @@
 
 &uart0 {
 	compatible = "nordic,nrf-uarte";
-	status = "disabled";
+	status = "okay";
 	current-speed = <115200>;
 	pinctrl-0 = <&uart0_default>;
 	pinctrl-1 = <&uart0_sleep>;

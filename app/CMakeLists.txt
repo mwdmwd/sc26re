@@ -10,11 +10,13 @@ project(steam_controller)
 target_sources(app PRIVATE
 	src/battery.c
 	src/calibration.c
+	src/charge_mode.c
 	src/hardware.c
 	src/haptics.c
 	src/ibex_settings_registry.c
 	src/main.c
 	src/power.c
+	src/puck_interface.c
 	src/radio_personality.c
 	src/shell.c
 	src/transport.c

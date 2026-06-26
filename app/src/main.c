@@ -7,9 +7,11 @@
 #include <zephyr/settings/settings.h>
 
 #include "battery.h"
+#include "charge_mode.h"
 #include "controller.h"
 #include "ibex_settings_registry.h"
 #include "power.h"
+#include "puck_interface.h"
 
 #if CONFIG_IBEX_RGBW_LED
 #include "rgbw_led.h"
@@ -49,10 +51,10 @@ static enum radio_personality boot_chord_personality(void)
 	return radio_personality_get();
 }
 
-static void set_boot_led(void)
+static void set_boot_led(bool usb_radio_off)
 {
 #if CONFIG_IBEX_RGBW_LED
-	if(transport_usb_attached())
+	if(usb_radio_off)
 	{
 		rgbw_led_set(0, 255, 0, 0);
 	}
@@ -72,6 +74,7 @@ int main(void)
 	struct controller_report previous = { 0 };
 	int64_t steam_button_since = 0;
 	int64_t last_input_sent = 0;
+	enum charge_mode_result charge_result = CHARGE_MODE_SKIPPED;
 	bool first = true;
 	int err;
 
@@ -95,8 +98,33 @@ int main(void)
 		LOG_ERR("hardware initialization failed: %d", err);
 		return err;
 	}
+	err = puck_interface_init();
+	if(err)
+	{
+		LOG_WRN("puck interface initialization failed: %d", err);
+	}
 
-	if(transport_usb_attached())
+	if(IS_ENABLED(CONFIG_IBEX_BATTERY))
+	{
+		err = battery_init();
+		if(err)
+		{
+			LOG_WRN("battery initialization failed: %d", err);
+		}
+	}
+
+	if(IS_ENABLED(CONFIG_IBEX_USB_HID))
+	{
+		err = transport_usb_init();
+		if(err)
+		{
+			LOG_ERR("USB initialization failed: %d", err);
+			return err;
+		}
+	}
+	charge_result = charge_mode_run_if_needed();
+
+	if(transport_usb_attached() && charge_result != CHARGE_MODE_POWER_ON_RADIO)
 	{
 		LOG_INF("USB attached; using radio-off USB mode without persisting personality");
 	}
@@ -112,22 +140,22 @@ int main(void)
 		}
 		radio_personality_persist_after(radio_personality_get(), PERSONALITY_PERSIST_DELAY_MS);
 	}
-	set_boot_led();
+	set_boot_led(transport_usb_attached() && charge_result != CHARGE_MODE_POWER_ON_RADIO);
 
-	err = transport_init();
+	if(charge_result == CHARGE_MODE_POWER_ON_RADIO &&
+	   transport_usb_attached() &&
+	   !transport_usb_configured())
+	{
+		err = transport_allow_radio_with_usb(true);
+	}
+	else
+	{
+		err = transport_init();
+	}
 	if(err)
 	{
 		LOG_ERR("transport initialization failed: %d", err);
 		return err;
-	}
-
-	if(IS_ENABLED(CONFIG_IBEX_BATTERY))
-	{
-		err = battery_init();
-		if(err)
-		{
-			LOG_WRN("battery initialization failed: %d", err);
-		}
 	}
 
 	LOG_INF("SC26re started in %s mode", radio_personality_name());

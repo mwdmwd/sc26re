@@ -6,6 +6,7 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/adc.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
 
@@ -26,12 +27,15 @@ LOG_MODULE_REGISTER(analog);
 #define TRIGGER_RANGE_MARGIN_PERCENT 15
 #define TRIGGER_CLICK_THRESHOLD_SETTING SETTING_TRIGGER_THRESHOLD_PERCENT
 #define TRIGGER_CLICK_RELEASE_HYSTERESIS_PERCENT 5
+#define PUCK_PILOT_SAMPLE_COUNT 3
+#define PUCK_PILOT_PRESENT_MIN_MV 2000
 
 enum analog_channel
 {
 	ANALOG_STICK_LEFT_X,
 	ANALOG_STICK_LEFT_Y,
 	ANALOG_STICK_RIGHT_X,
+	ANALOG_PUCK_PILOT = ANALOG_STICK_RIGHT_X,
 	ANALOG_STICK_RIGHT_Y,
 	ANALOG_TRIGGER_LEFT,
 	ANALOG_TRIGGER_RIGHT,
@@ -48,6 +52,8 @@ static const struct adc_dt_spec analog_channels[] = {
 static const struct gpio_dt_spec analog_enable = GPIO_DT_SPEC_GET(ANALOG_NODE, enable_gpios);
 static bool trigger_left_click_latched;
 static bool trigger_right_click_latched;
+static bool analog_ready;
+K_MUTEX_DEFINE(analog_lock);
 
 BUILD_ASSERT(ARRAY_SIZE(analog_channels) == ANALOG_CHANNEL_COUNT);
 
@@ -221,7 +227,93 @@ int analog_init(void)
 		        calibration_stick_loaded(CALIBRATION_LEFT),
 		        calibration_stick_loaded(CALIBRATION_RIGHT));
 	}
+	analog_ready = true;
 	return 0;
+}
+
+static int analog_take(void)
+{
+	int err;
+
+	k_mutex_lock(&analog_lock, K_FOREVER);
+	err = gpio_pin_set_dt(&analog_enable, 1);
+	if(err)
+	{
+		k_mutex_unlock(&analog_lock);
+		return err;
+	}
+	k_usleep(ANALOG_POWER_SETTLE_US);
+	return 0;
+}
+
+static int analog_put(void)
+{
+	int err;
+
+	__ASSERT_NO_MSG(analog_lock.owner == k_current_get());
+
+	err = gpio_pin_set_dt(&analog_enable, 0);
+	k_mutex_unlock(&analog_lock);
+	return err;
+}
+
+int analog_puck_pilot_present(bool *present)
+{
+	const struct adc_dt_spec *channel = &analog_channels[ANALOG_PUCK_PILOT];
+	int16_t raw;
+	int32_t mv;
+	int present_samples = 0;
+	int err;
+
+	if(present == NULL)
+	{
+		return -EINVAL;
+	}
+	*present = false;
+
+	if(!analog_ready)
+	{
+		return -ENODEV;
+	}
+
+	err = analog_take();
+	if(err)
+	{
+		return err;
+	}
+
+	for(size_t i = 0; i < PUCK_PILOT_SAMPLE_COUNT; ++i)
+	{
+		struct adc_sequence sequence = {
+			.channels = BIT(channel->channel_id),
+			.buffer = &raw,
+			.buffer_size = sizeof(raw),
+			.resolution = 12,
+		};
+
+		err = adc_read(channel->dev, &sequence);
+		if(err)
+		{
+			goto out_disable;
+		}
+
+		mv = raw;
+		err = adc_raw_to_millivolts_dt(channel, &mv);
+		if(err)
+		{
+			goto out_disable;
+		}
+
+		present_samples += mv >= PUCK_PILOT_PRESENT_MIN_MV;
+		k_msleep(100);
+	}
+
+	*present = present_samples > PUCK_PILOT_SAMPLE_COUNT / 2;
+	err = 0;
+
+out_disable:
+	analog_put();
+	return err;
 }
 
 int analog_read_report(struct controller_report *report)
@@ -240,15 +332,19 @@ int analog_read_report(struct controller_report *report)
 	};
 	int err;
 
-	err = gpio_pin_set_dt(&analog_enable, 1);
+	if(!analog_ready)
+	{
+		return -ENODEV;
+	}
+
+	err = analog_take();
 	if(err)
 	{
 		return err;
 	}
-	k_usleep(ANALOG_POWER_SETTLE_US);
 
 	err = adc_read(analog_channels[0].dev, &sequence);
-	(void)gpio_pin_set_dt(&analog_enable, 0);
+	analog_put();
 	if(err)
 	{
 		return err;
@@ -300,5 +396,7 @@ int analog_read_report(struct controller_report *report)
 		report->buttons |= BIT(CONTROLLER_BUTTON_RIGHT_TRIGGER_CLICK);
 	}
 
-	return 0;
+	err = 0;
+
+	return err;
 }

@@ -14,6 +14,7 @@ enum valve_feature_link
 	VALVE_FEATURE_LINK_BLE,
 	VALVE_FEATURE_LINK_USB,
 	VALVE_FEATURE_LINK_ESB,
+	VALVE_FEATURE_LINK_PUCK,
 };
 
 enum valve_feature_opcode
@@ -56,5 +57,10 @@ enum valve_feature_opcode
 	VALVE_FEATURE_WRITE_PROVISIONING = 0xFE,                                      /* 0xFE */
 };
 
+int valve_feature_handle_request(enum valve_feature_link link, const uint8_t *request,
+                                 size_t request_len);
+ssize_t valve_feature_prepare_response(enum valve_feature_link link, const uint8_t *request,
+                                       size_t request_len, uint8_t *response,
+                                       size_t response_capacity);
 ssize_t valve_feature_respond(enum valve_feature_link link, const uint8_t *request,
                               size_t request_len, uint8_t *response, size_t response_capacity);
