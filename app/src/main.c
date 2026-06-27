@@ -56,15 +56,15 @@ static void set_boot_led(bool usb_radio_off)
 #if CONFIG_IBEX_RGBW_LED
 	if(usb_radio_off)
 	{
-		rgbw_led_set(0, 255, 0, 0);
+		rgbw_led_set((struct rgbw_color){ 0, 255, 0, 0 });
 	}
 	else if(radio_personality_get() == RADIO_PERSONALITY_BLE)
 	{
-		rgbw_led_set(0, 0, 255, 0);
+		rgbw_led_set((struct rgbw_color){ 0, 0, 255, 0 });
 	}
 	else
 	{
-		rgbw_led_set(0, 0, 0, 255);
+		rgbw_led_set((struct rgbw_color){ 0, 0, 0, 255 });
 	}
 #endif
 }

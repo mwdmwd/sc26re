@@ -12,13 +12,21 @@
  */
 int rgbw_led_init(void);
 
+struct rgbw_color
+{
+	uint8_t r;
+	uint8_t g;
+	uint8_t b;
+	uint8_t w;
+};
+
 /**
  * Set the LED color as normalized 0-255 per channel.
  *
  * Each component maps to the in-tree Zephyr LED API brightness scale. The white
  * channel is independent from RGB.
  */
-void rgbw_led_set(uint8_t r, uint8_t g, uint8_t b, uint8_t w);
+void rgbw_led_set(struct rgbw_color color);
 
 /**
  * Turn all LED channels off.
@@ -33,4 +41,4 @@ void rgbw_led_prepare_poweroff(void);
 /**
  * Get the current RGBW values (0-255 per channel).
  */
-void rgbw_led_get(uint8_t *r, uint8_t *g, uint8_t *b, uint8_t *w);
+struct rgbw_color rgbw_led_get(void);

@@ -89,7 +89,7 @@ static void usb_enter_mode(void)
 #if CONFIG_IBEX_RGBW_LED
 	if(transport_usb_configured())
 	{
-		rgbw_led_set(0, 255, 0, 0);
+		rgbw_led_set((struct rgbw_color){ 0, 255, 0, 0 });
 	}
 #endif
 

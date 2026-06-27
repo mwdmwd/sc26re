@@ -24,7 +24,7 @@ enum ibex_rgbw_channel
 
 static const struct device *const rgbw_leds = DEVICE_DT_GET(PWMRGBLEDS_NODE);
 
-static uint8_t current_r, current_g, current_b, current_w;
+static struct rgbw_color current = { 0 };
 
 static void rgbw_led_force_pin_off(uint32_t pin)
 {
@@ -52,17 +52,14 @@ int rgbw_led_init(void)
 	return 0;
 }
 
-void rgbw_led_set(uint8_t r, uint8_t g, uint8_t b, uint8_t w)
+void rgbw_led_set(struct rgbw_color color)
 {
-	current_r = r;
-	current_g = g;
-	current_b = b;
-	current_w = w;
+	current = color;
 
-	if(rgbw_led_set_channel(IBEX_RGBW_RED, r) ||
-	   rgbw_led_set_channel(IBEX_RGBW_GREEN, g) ||
-	   rgbw_led_set_channel(IBEX_RGBW_BLUE, b) ||
-	   rgbw_led_set_channel(IBEX_RGBW_WHITE, w))
+	if(rgbw_led_set_channel(IBEX_RGBW_RED, current.r) ||
+	   rgbw_led_set_channel(IBEX_RGBW_GREEN, current.g) ||
+	   rgbw_led_set_channel(IBEX_RGBW_BLUE, current.b) ||
+	   rgbw_led_set_channel(IBEX_RGBW_WHITE, current.w))
 	{
 		LOG_WRN("failed to set one or more LED channels");
 	}
@@ -70,7 +67,7 @@ void rgbw_led_set(uint8_t r, uint8_t g, uint8_t b, uint8_t w)
 
 void rgbw_led_off(void)
 {
-	rgbw_led_set(0, 0, 0, 0);
+	rgbw_led_set((struct rgbw_color){ 0 });
 }
 
 void rgbw_led_prepare_poweroff(void)
@@ -83,10 +80,7 @@ void rgbw_led_prepare_poweroff(void)
 	rgbw_led_force_pin_off(NRF_GPIO_PIN_MAP(1, 8));
 }
 
-void rgbw_led_get(uint8_t *r, uint8_t *g, uint8_t *b, uint8_t *w)
+struct rgbw_color rgbw_led_get(void)
 {
-	*r = current_r;
-	*g = current_g;
-	*b = current_b;
-	*w = current_w;
+	return current;
 }

@@ -13,10 +13,7 @@
 #include "controller.h"
 #include "power.h"
 #include "puck_interface.h"
-
-#if CONFIG_IBEX_RGBW_LED
 #include "rgbw_led.h"
-#endif
 
 LOG_MODULE_REGISTER(charge_mode);
 
@@ -28,17 +25,9 @@ LOG_MODULE_REGISTER(charge_mode);
 #define CHARGE_MODE_STEAM_HOLD_MS 250
 #define CHARGE_MODE_FULL_LED_MS 10000
 
-struct charge_led_color
-{
-	uint8_t r;
-	uint8_t g;
-	uint8_t b;
-	uint8_t w;
-};
-
-static const struct charge_led_color led_off = { 0, 0, 0, 0 };
-static const struct charge_led_color led_dim_amber = { 4, 5, 0, 0 };
-static const struct charge_led_color led_peak_amber = { 26, 20, 0, 0 };
+static const struct rgbw_color led_off = { 0, 0, 0, 0 };
+static const struct rgbw_color led_dim_amber = { 4, 5, 0, 0 };
+static const struct rgbw_color led_peak_amber = { 26, 20, 0, 0 };
 static bool charge_contact_latched;
 static int64_t charge_contact_last_seen_ms;
 static int64_t puck_pilot_last_sample_ms;
@@ -178,10 +167,10 @@ static uint8_t lerp8(uint8_t from, uint8_t to, uint32_t num, uint32_t denom)
 	return (uint8_t)(value / denom);
 }
 
-static void charge_led_set(const struct charge_led_color color)
+static void charge_led_set(const struct rgbw_color color)
 {
 #if CONFIG_IBEX_RGBW_LED
-	rgbw_led_set(color.r, color.g, color.b, color.w);
+	rgbw_led_set(color);
 #else
 	ARG_UNUSED(color);
 #endif
@@ -204,12 +193,12 @@ static enum charge_mode_result charge_mode_delay(uint32_t duration_ms)
 	return CHARGE_MODE_SKIPPED;
 }
 
-static enum charge_mode_result charge_led_fade(const struct charge_led_color from,
-                                               const struct charge_led_color to, uint32_t duration_ms)
+static enum charge_mode_result charge_led_fade(const struct rgbw_color from,
+                                               const struct rgbw_color to, uint32_t duration_ms)
 {
 	for(uint32_t elapsed = 0; elapsed <= duration_ms; elapsed += CHARGE_MODE_LED_STEP_MS)
 	{
-		struct charge_led_color color = {
+		struct rgbw_color color = {
 			.r = lerp8(from.r, to.r, elapsed, duration_ms),
 			.g = lerp8(from.g, to.g, elapsed, duration_ms),
 			.b = lerp8(from.b, to.b, elapsed, duration_ms),
@@ -306,7 +295,7 @@ enum charge_mode_result charge_mode_run_if_needed(void)
 
 		if(charge_complete)
 		{
-			struct charge_led_color color = led_off;
+			struct rgbw_color color = led_off;
 
 			if(k_uptime_get() - charge_complete_since_ms < CHARGE_MODE_FULL_LED_MS)
 			{

@@ -483,7 +483,7 @@ static int cmd_led_set(const struct shell *shell, size_t argc, char **argv)
 		}
 	}
 
-	rgbw_led_set(r, g, b, w);
+	rgbw_led_set((struct rgbw_color){ r, g, b, w });
 	shell_print(shell, "LED: r=%u g=%u b=%u w=%u", r, g, b, w);
 	return 0;
 }
@@ -500,13 +500,12 @@ static int cmd_led_off(const struct shell *shell, size_t argc, char **argv)
 
 static int cmd_led_get(const struct shell *shell, size_t argc, char **argv)
 {
-	uint8_t r, g, b, w;
+	struct rgbw_color color = rgbw_led_get();
 
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	rgbw_led_get(&r, &g, &b, &w);
-	shell_print(shell, "LED: r=%u g=%u b=%u w=%u", r, g, b, w);
+	shell_print(shell, "LED: r=%u g=%u b=%u w=%u", color.r, color.g, color.b, color.w);
 	return 0;
 }
 
