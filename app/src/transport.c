@@ -8,8 +8,7 @@
 
 LOG_MODULE_REGISTER(transport);
 
-static bool radio_usb_allowed;
-static bool radio_debug_usb_allowed;
+static enum transport_usb_radio_mode usb_radio_mode;
 
 __weak bool transport_usb_attached(void)
 {
@@ -149,52 +148,91 @@ static int transport_start_radio(void)
 	return 0;
 }
 
-static int transport_set_radio_usb_allowed(bool allow, bool diagnostic)
+bool transport_usb_radio_allowed(void)
 {
-	bool *state = diagnostic ? &radio_debug_usb_allowed : &radio_usb_allowed;
+	return usb_radio_mode != TRANSPORT_USB_RADIO_OFF;
+}
+
+static bool transport_usb_reports_suppressed(void)
+{
+	return usb_radio_mode == TRANSPORT_USB_RADIO_DIAGNOSTIC;
+}
+
+static bool transport_usb_radio_mode_valid(enum transport_usb_radio_mode mode)
+{
+	return mode == TRANSPORT_USB_RADIO_OFF ||
+	       mode == TRANSPORT_USB_RADIO_VBUS_CHARGE ||
+	       mode == TRANSPORT_USB_RADIO_DIAGNOSTIC;
+}
+
+const char *transport_usb_radio_mode_name(void)
+{
+	switch(usb_radio_mode)
+	{
+		case TRANSPORT_USB_RADIO_OFF:
+			return "off";
+		case TRANSPORT_USB_RADIO_VBUS_CHARGE:
+			return "vbus-charge";
+		case TRANSPORT_USB_RADIO_DIAGNOSTIC:
+			return "diagnostic";
+		default:
+			return "unknown";
+	}
+}
+
+int transport_set_usb_radio_mode(enum transport_usb_radio_mode mode)
+{
+	enum transport_usb_radio_mode old_mode;
 	bool was_allowed;
 	int err = 0;
 
-	if(*state == allow)
+	if(!transport_usb_radio_mode_valid(mode))
+	{
+		return -EINVAL;
+	}
+	if(mode == TRANSPORT_USB_RADIO_VBUS_CHARGE && transport_usb_configured())
+	{
+		mode = TRANSPORT_USB_RADIO_OFF;
+	}
+
+	old_mode = usb_radio_mode;
+	was_allowed = transport_usb_radio_allowed();
+
+	if(old_mode == mode)
 	{
 		return 0;
 	}
 
-	was_allowed = radio_usb_allowed || radio_debug_usb_allowed;
-	*state = allow;
+	usb_radio_mode = mode;
 	if(!transport_usb_attached())
 	{
 		return 0;
 	}
 
-	if(allow)
+	if(transport_usb_radio_allowed())
 	{
-		if(diagnostic)
+		if(usb_radio_mode == TRANSPORT_USB_RADIO_DIAGNOSTIC)
 		{
-			LOG_WRN("diagnostic mode: allowing radio while USB is attached; "
-			        "USB HID reports suppressed");
+			LOG_WRN("USB radio diagnostic mode enabled; USB HID reports suppressed");
 		}
-		else
+		else if(usb_radio_mode == TRANSPORT_USB_RADIO_VBUS_CHARGE)
 		{
 			LOG_INF("allowing radio while charger VBUS is attached");
 		}
-		err = transport_start_radio();
-		if(err)
+
+		if(!was_allowed)
 		{
-			*state = false;
+			err = transport_start_radio();
+			if(err)
+			{
+				usb_radio_mode = old_mode;
+			}
 		}
 	}
 	else
 	{
-		if(diagnostic)
-		{
-			LOG_INF("USB radio diagnostic mode disabled");
-		}
-		else
-		{
-			LOG_INF("USB radio mode disabled");
-		}
-		if(was_allowed && !radio_usb_allowed && !radio_debug_usb_allowed)
+		LOG_INF("USB radio mode disabled");
+		if(was_allowed)
 		{
 			transport_ble_deactivate();
 			transport_esb_deactivate();
@@ -203,19 +241,23 @@ static int transport_set_radio_usb_allowed(bool allow, bool diagnostic)
 	return err;
 }
 
-int transport_allow_radio_with_usb(bool allow)
+void transport_enter_usb_mode(void)
 {
-	return transport_set_radio_usb_allowed(allow, false);
-}
+	radio_personality_cancel_pending_persist();
 
-int transport_radio_debug_allow_usb(bool allow)
-{
-	return transport_set_radio_usb_allowed(allow, true);
-}
+	if(usb_radio_mode == TRANSPORT_USB_RADIO_DIAGNOSTIC)
+	{
+		return;
+	}
 
-bool transport_radio_debug_usb_allowed(void)
-{
-	return radio_debug_usb_allowed;
+	if(usb_radio_mode == TRANSPORT_USB_RADIO_VBUS_CHARGE)
+	{
+		LOG_INF("USB configured; leaving charger VBUS radio mode");
+		usb_radio_mode = TRANSPORT_USB_RADIO_OFF;
+	}
+
+	transport_ble_deactivate();
+	transport_esb_deactivate();
 }
 
 int transport_init(void)
@@ -229,7 +271,7 @@ int transport_init(void)
 		{
 			return err;
 		}
-		if(transport_usb_attached() && !radio_usb_allowed && !radio_debug_usb_allowed)
+		if(transport_usb_attached() && !transport_usb_radio_allowed())
 		{
 			LOG_INF("USB attached; leaving radio transports inactive");
 			return 0;
@@ -247,7 +289,7 @@ int transport_send(const struct controller_report *report)
 
 	if(IS_ENABLED(CONFIG_IBEX_USB_HID))
 	{
-		if(!radio_debug_usb_allowed)
+		if(!transport_usb_reports_suppressed())
 		{
 			usb_err = transport_usb_send(report);
 			if(transport_usb_configured())
@@ -295,7 +337,7 @@ int transport_send_battery_status(const struct controller_battery_report *report
 
 	if(IS_ENABLED(CONFIG_IBEX_USB_HID))
 	{
-		if(!radio_debug_usb_allowed)
+		if(!transport_usb_reports_suppressed())
 		{
 			usb_err = transport_usb_send_battery_status(report);
 			if(transport_usb_configured())

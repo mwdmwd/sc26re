@@ -123,8 +123,7 @@ static int cmd_radio_status(const struct shell *shell, size_t argc, char **argv)
 	ARG_UNUSED(argv);
 
 	shell_print(shell, "radio personality: %s", radio_personality_name());
-	shell_print(shell, "USB radio diagnostic mode: %s",
-	            transport_radio_debug_usb_allowed() ? "on" : "off");
+	shell_print(shell, "USB radio mode: %s", transport_usb_radio_mode_name());
 	return 0;
 }
 
@@ -266,7 +265,8 @@ static int cmd_radio_usb_debug(const struct shell *shell, size_t argc, char **ar
 		return -EINVAL;
 	}
 
-	err = transport_radio_debug_allow_usb(allow);
+	err = transport_set_usb_radio_mode(allow ? TRANSPORT_USB_RADIO_DIAGNOSTIC
+	                                         : TRANSPORT_USB_RADIO_OFF);
 	if(err)
 	{
 		shell_error(shell, "radio diagnostic mode failed: %d", err);

@@ -83,8 +83,7 @@ static void usb_schedule_unplug_poweroff(void)
 static void usb_enter_mode(void)
 {
 	usb_cancel_unplug_poweroff();
-	radio_personality_cancel_pending_persist();
-	(void)transport_allow_radio_with_usb(false);
+	transport_enter_usb_mode();
 
 #if CONFIG_IBEX_RGBW_LED
 	if(transport_usb_configured())
@@ -92,12 +91,6 @@ static void usb_enter_mode(void)
 		rgbw_led_set((struct rgbw_color){ 0, 255, 0, 0 });
 	}
 #endif
-
-	if(!transport_radio_debug_usb_allowed())
-	{
-		transport_ble_deactivate();
-		transport_esb_deactivate();
-	}
 }
 
 static void usb_unplug_poweroff_work_handler(struct k_work *work)
@@ -135,7 +128,9 @@ static void usb_status_cb(enum usb_dc_status_code status, const uint8_t *param)
 			atomic_clear(&usb_attached);
 			atomic_clear(&usb_configured);
 			atomic_clear(&usb_suspended);
-			if(was_attached && atomic_cas(&usb_radio_off_mode, 1, 0))
+			if(was_attached &&
+			   atomic_cas(&usb_radio_off_mode, 1, 0) &&
+			   !transport_usb_radio_allowed())
 			{
 				usb_schedule_unplug_poweroff();
 			}

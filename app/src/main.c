@@ -75,6 +75,7 @@ int main(void)
 	int64_t steam_button_since = 0;
 	int64_t last_input_sent = 0;
 	enum charge_mode_result charge_result = CHARGE_MODE_SKIPPED;
+	bool usb_vbus_charge_radio;
 	bool first = true;
 	int err;
 
@@ -123,8 +124,11 @@ int main(void)
 		}
 	}
 	charge_result = charge_mode_run_if_needed();
+	usb_vbus_charge_radio = charge_result == CHARGE_MODE_POWER_ON_RADIO &&
+	                        transport_usb_attached() &&
+	                        !transport_usb_configured();
 
-	if(transport_usb_attached() && charge_result != CHARGE_MODE_POWER_ON_RADIO)
+	if(transport_usb_attached() && !usb_vbus_charge_radio)
 	{
 		LOG_INF("USB attached; using radio-off USB mode without persisting personality");
 	}
@@ -140,13 +144,11 @@ int main(void)
 		}
 		radio_personality_persist_after(radio_personality_get(), PERSONALITY_PERSIST_DELAY_MS);
 	}
-	set_boot_led(transport_usb_attached() && charge_result != CHARGE_MODE_POWER_ON_RADIO);
+	set_boot_led(transport_usb_attached() && !usb_vbus_charge_radio);
 
-	if(charge_result == CHARGE_MODE_POWER_ON_RADIO &&
-	   transport_usb_attached() &&
-	   !transport_usb_configured())
+	if(usb_vbus_charge_radio)
 	{
-		err = transport_allow_radio_with_usb(true);
+		err = transport_set_usb_radio_mode(TRANSPORT_USB_RADIO_VBUS_CHARGE);
 	}
 	else
 	{

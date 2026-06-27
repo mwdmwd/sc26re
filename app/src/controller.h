@@ -104,6 +104,13 @@ int transport_init(void);
 int transport_send(const struct controller_report *report);
 int transport_send_battery_status(const struct controller_battery_report *report);
 
+enum transport_usb_radio_mode
+{
+	TRANSPORT_USB_RADIO_OFF,
+	TRANSPORT_USB_RADIO_VBUS_CHARGE,
+	TRANSPORT_USB_RADIO_DIAGNOSTIC,
+};
+
 #define TRANSPORT_BLE_ID_ALL UINT8_MAX
 int transport_ble_init(void);
 int transport_ble_send(const struct controller_report *report);
@@ -113,9 +120,10 @@ int transport_ble_clear_bonds(uint8_t id);
 
 bool transport_usb_attached(void);
 bool transport_usb_configured(void);
-int transport_allow_radio_with_usb(bool allow);
-int transport_radio_debug_allow_usb(bool allow);
-bool transport_radio_debug_usb_allowed(void);
+int transport_set_usb_radio_mode(enum transport_usb_radio_mode mode);
+bool transport_usb_radio_allowed(void);
+const char *transport_usb_radio_mode_name(void);
+void transport_enter_usb_mode(void);
 int transport_usb_init(void);
 int transport_usb_send(const struct controller_report *report);
 int transport_usb_send_battery_status(const struct controller_battery_report *report);
