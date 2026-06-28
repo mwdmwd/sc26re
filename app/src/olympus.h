@@ -10,13 +10,18 @@ struct olympus_pad_debug
 	uint16_t pressure;
 	int16_t raw_pressure;
 	int16_t raw_click;
+	int16_t raw_grip;
+	int32_t grip_value;
 	int32_t peak_x;
 	int32_t peak_y;
 	int32_t peak;
 	int32_t noise_threshold;
 	int32_t touch_threshold;
 	int32_t release_threshold;
+	int32_t grip_touch_threshold;
+	int32_t grip_release_threshold;
 	int32_t pad_click_threshold;
+	bool grip_touched;
 	bool stick_touched;
 	bool touched;
 	bool clicked;

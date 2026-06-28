@@ -414,13 +414,14 @@ static void print_olympus_pad_debug(const struct shell *shell, const char *name,
                                     const struct olympus_pad_debug *pad)
 {
 	shell_print(shell,
-	            "%s: touch=%u stick_touch=%u click=%u x=%d y=%d pressure=%u raw_pressure=%d "
-	            "raw_click=%d "
-	            "peak=%d peak_x=%d peak_y=%d thr=%d/%d noise=%d click_thr=%d",
-	            name, pad->touched, pad->stick_touched, pad->clicked, pad->x, pad->y, pad->pressure,
-	            pad->raw_pressure, pad->raw_click, pad->peak, pad->peak_x, pad->peak_y,
-	            pad->touch_threshold, pad->release_threshold, pad->noise_threshold,
-	            pad->pad_click_threshold);
+	            "%s: touch=%u stick_touch=%u grip_touch=%u click=%u x=%d y=%d pressure=%u "
+	            "raw_pressure=%d raw_click=%d raw_grip=%d grip=%d "
+	            "peak=%d peak_x=%d peak_y=%d thr=%d/%d grip_thr=%d/%d noise=%d click_thr=%d",
+	            name, pad->touched, pad->stick_touched, pad->grip_touched, pad->clicked, pad->x,
+	            pad->y, pad->pressure, pad->raw_pressure, pad->raw_click, pad->raw_grip,
+	            pad->grip_value, pad->peak, pad->peak_x, pad->peak_y, pad->touch_threshold,
+	            pad->release_threshold, pad->grip_touch_threshold, pad->grip_release_threshold,
+	            pad->noise_threshold, pad->pad_click_threshold);
 }
 
 static int cmd_olympus_status(const struct shell *shell, size_t argc, char **argv)

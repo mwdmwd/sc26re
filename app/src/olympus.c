@@ -12,9 +12,11 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
+#include "battery.h"
 #include "ibex_settings_registry.h"
 #include "olympus.h"
 #include "olympus_config.h"
+#include "puck_interface.h"
 
 LOG_MODULE_REGISTER(olympus);
 
@@ -32,6 +34,12 @@ LOG_MODULE_REGISTER(olympus);
 #define OLYMPUS_PAD_CLICK_PRESSURE_SCALE 10
 #define OLYMPUS_PRESSURE_SCALE 32
 #define OLYMPUS_PRESSURE_MAX INT16_MAX
+#define OLYMPUS_GRIP_BASE_THRESHOLD 225
+#define OLYMPUS_GRIP_THRESHOLD_PER_PERCENT 9
+#define OLYMPUS_GRIP_TOUCH_PERCENT 100
+#define OLYMPUS_GRIP_RELEASE_PERCENT 80
+#define OLYMPUS_GRIP_NO_SOURCE_SCALE_NUMERATOR 3
+#define OLYMPUS_GRIP_NO_SOURCE_SCALE_DENOMINATOR 2
 #define OLYMPUS_DESCRIPTOR_ADDRESS 0x20
 #define OLYMPUS_DESCRIPTOR_SIZE 30
 #define OLYMPUS_VENDOR_ID 0x0488
@@ -56,9 +64,13 @@ struct olympus_pad_state
 	bool touched;
 	bool stick_touched;
 	bool pad_clicked;
+	bool grip_touched;
 	bool click_filter_initialized;
+	bool grip_filter_initialized;
 	uint8_t click_sample_index;
+	uint8_t grip_sample_index;
 	int16_t click_samples[2];
+	int16_t grip_samples[2];
 	float filtered_x;
 	float filtered_y;
 	int32_t filtered_touch_pressure;
@@ -112,6 +124,60 @@ static int32_t pad_click_threshold(bool right)
 	return MAX(MAX((int32_t)registry_setting_or_default(id, OLYMPUS_PAD_CLICK_PRESSURE), 0) *
 	               OLYMPUS_PAD_CLICK_PRESSURE_SCALE,
 	           OLYMPUS_PAD_CLICK_PRESSURE);
+}
+
+static int32_t grip_touch_threshold(void)
+{
+	int16_t percent = registry_setting_or_default(IBEX_SETTING_OLYMPUS_GRIP_TOUCH_PERCENT,
+	                                              OLYMPUS_GRIP_TOUCH_PERCENT);
+
+	return MAX((int32_t)percent, 0) * OLYMPUS_GRIP_THRESHOLD_PER_PERCENT +
+	       OLYMPUS_GRIP_BASE_THRESHOLD;
+}
+
+static int32_t grip_release_threshold(int32_t touch_threshold)
+{
+	int16_t percent = registry_setting_or_default(IBEX_SETTING_OLYMPUS_GRIP_RELEASE_PERCENT,
+	                                              OLYMPUS_GRIP_RELEASE_PERCENT);
+
+	percent = CLAMP(percent, 0, 100);
+	return (touch_threshold * percent) / 100;
+}
+
+static bool external_source_present(void)
+{
+	if(transport_usb_attached() || puck_interface_active())
+	{
+		return true;
+	}
+
+#if CONFIG_IBEX_BATTERY
+	struct controller_battery_report report;
+
+	if(battery_get_status(&report) == 0 && report.charger_type != 0)
+	{
+		return true;
+	}
+#endif
+
+	return false;
+}
+
+static int16_t grip_raw_for_source_state(int16_t raw)
+{
+	if(external_source_present())
+	{
+		return raw;
+	}
+
+	return CLAMP(((int32_t)raw * OLYMPUS_GRIP_NO_SOURCE_SCALE_NUMERATOR) /
+	                 OLYMPUS_GRIP_NO_SOURCE_SCALE_DENOMINATOR,
+	             INT16_MIN, INT16_MAX);
+}
+
+static int32_t two_sample_mean(const int16_t samples[2])
+{
+	return ((int32_t)samples[0] + samples[1]) / 2;
 }
 
 BUILD_ASSERT(sizeof(struct olympus_global_config) == 7);
@@ -380,8 +446,9 @@ static uint16_t scale_pad_pressure(int32_t raw)
 
 static void decode_pad(struct olympus_pad_state *state, const int16_t *x_samples,
                        const int16_t *y_samples, int16_t raw_pressure, int16_t raw_click,
-                       bool right, int16_t *x, int16_t *y, uint16_t *pressure, bool *touched,
-                       bool *stick_touched, bool *clicked, struct olympus_pad_debug *debug)
+                       int16_t raw_grip, bool right, int16_t *x, int16_t *y, uint16_t *pressure,
+                       bool *touched, bool *stick_touched, bool *clicked, bool *grip_touched,
+                       struct olympus_pad_debug *debug)
 {
 	int32_t peak_x;
 	int32_t peak_y;
@@ -389,9 +456,12 @@ static void decode_pad(struct olympus_pad_state *state, const int16_t *x_samples
 	int32_t pressure_value;
 	int32_t touch_pressure;
 	int32_t click_value;
+	int32_t grip_value;
 	int32_t noise_threshold;
 	int32_t touch_threshold;
 	int32_t release_threshold;
+	int32_t grip_touch;
+	int32_t grip_release;
 	int32_t pressure_click_threshold;
 	float normalized_x;
 	float normalized_y;
@@ -402,6 +472,8 @@ static void decode_pad(struct olympus_pad_state *state, const int16_t *x_samples
 	    scaled_setting_or_default(IBEX_SETTING_TIMP_TOUCH_THRESHOLD_ON, OLYMPUS_TOUCH_THRESHOLD);
 	release_threshold =
 	    scaled_setting_or_default(IBEX_SETTING_TIMP_TOUCH_THRESHOLD_OFF, OLYMPUS_RELEASE_THRESHOLD);
+	grip_touch = grip_touch_threshold();
+	grip_release = grip_release_threshold(grip_touch);
 	pressure_click_threshold = pad_click_threshold(right);
 
 	normalized_x = expand_edge_position(electrode_centroid(x_samples, true, &peak_x));
@@ -468,7 +540,7 @@ static void decode_pad(struct olympus_pad_state *state, const int16_t *x_samples
 		state->click_samples[state->click_sample_index] = raw_click;
 		state->click_sample_index ^= 1;
 	}
-	click_value = ((int32_t)state->click_samples[0] + state->click_samples[1]) / 2;
+	click_value = two_sample_mean(state->click_samples);
 
 	if(state->stick_touched)
 	{
@@ -492,10 +564,34 @@ static void decode_pad(struct olympus_pad_state *state, const int16_t *x_samples
 		state->pad_clicked = pressure_value >= pressure_click_threshold;
 	}
 
+	raw_grip = grip_raw_for_source_state(raw_grip);
+	if(!state->grip_filter_initialized)
+	{
+		state->grip_samples[0] = raw_grip;
+		state->grip_samples[1] = raw_grip;
+		state->grip_filter_initialized = true;
+	}
+	else
+	{
+		state->grip_samples[state->grip_sample_index] = raw_grip;
+		state->grip_sample_index ^= 1;
+	}
+	grip_value = two_sample_mean(state->grip_samples);
+
+	if(state->grip_touched)
+	{
+		state->grip_touched = grip_value >= grip_release;
+	}
+	else
+	{
+		state->grip_touched = grip_value > grip_touch;
+	}
+
 	*pressure = scale_pad_pressure(pressure_value);
 	*touched = state->touched;
 	*stick_touched = state->stick_touched;
 	*clicked = state->pad_clicked;
+	*grip_touched = state->grip_touched;
 
 	if(!state->touched)
 	{
@@ -510,13 +606,18 @@ static void decode_pad(struct olympus_pad_state *state, const int16_t *x_samples
 		.pressure = *pressure,
 		.raw_pressure = raw_pressure,
 		.raw_click = raw_click,
+		.raw_grip = raw_grip,
+		.grip_value = grip_value,
 		.peak_x = peak_x,
 		.peak_y = peak_y,
 		.peak = touch_pressure,
 		.noise_threshold = noise_threshold,
 		.touch_threshold = touch_threshold,
 		.release_threshold = release_threshold,
+		.grip_touch_threshold = grip_touch,
+		.grip_release_threshold = grip_release,
 		.pad_click_threshold = pressure_click_threshold,
+		.grip_touched = *grip_touched,
 		.stick_touched = *stick_touched,
 		.touched = *touched,
 		.clicked = *clicked,
@@ -536,6 +637,7 @@ static void olympus_process_sensor_payload(const uint8_t *payload)
 	uint16_t right_pressure;
 	bool left_touched, left_stick_touched, left_clicked;
 	bool right_touched, right_stick_touched, right_clicked;
+	bool left_grip_touched, right_grip_touched;
 	int16_t click_suppress_mask;
 
 	for(size_t i = 0; i < ARRAY_SIZE(values); ++i)
@@ -543,11 +645,16 @@ static void olympus_process_sensor_payload(const uint8_t *payload)
 		values[i] = sys_get_le16(&payload[i * sizeof(int16_t)]);
 	}
 
-	decode_pad(&left_pad, &values[0], &values[8], values[33], values[37], false, &left_x, &left_y,
-	           &left_pressure, &left_touched, &left_stick_touched, &left_clicked, &debug.left);
-	decode_pad(&right_pad, &values[16], &values[24], values[32], values[36], true, &right_x,
-	           &right_y, &right_pressure, &right_touched, &right_stick_touched, &right_clicked,
-	           &debug.right);
+	/*
+	 * Stock Olympus routes the two grip-sense scalar results between the
+	 * pad-pressure and pad-click scalars. They are ordered right, then left.
+	 */
+	decode_pad(&left_pad, &values[0], &values[8], values[33], values[37], values[35], false,
+	           &left_x, &left_y, &left_pressure, &left_touched, &left_stick_touched, &left_clicked,
+	           &left_grip_touched, &debug.left);
+	decode_pad(&right_pad, &values[16], &values[24], values[32], values[36], values[34], true,
+	           &right_x, &right_y, &right_pressure, &right_touched, &right_stick_touched,
+	           &right_clicked, &right_grip_touched, &debug.right);
 	click_suppress_mask = registry_setting_or_default(IBEX_SETTING_OLYMPUS_CLICK_SUPPRESS_MASK, 3);
 
 	if(left_clicked && (click_suppress_mask & BIT(0)))
@@ -596,6 +703,10 @@ static void olympus_process_sensor_payload(const uint8_t *payload)
 	{
 		next.buttons |= BIT(CONTROLLER_BUTTON_LEFT_STICK_TOUCH);
 	}
+	if(left_grip_touched)
+	{
+		next.buttons |= BIT(CONTROLLER_BUTTON_LEFT_GRIP_TOUCH);
+	}
 	if(right_touched)
 	{
 		next.buttons |= BIT(CONTROLLER_BUTTON_RIGHT_TOUCHPAD_TOUCH);
@@ -607,6 +718,10 @@ static void olympus_process_sensor_payload(const uint8_t *payload)
 	if(right_stick_touched)
 	{
 		next.buttons |= BIT(CONTROLLER_BUTTON_RIGHT_STICK_TOUCH);
+	}
+	if(right_grip_touched)
+	{
+		next.buttons |= BIT(CONTROLLER_BUTTON_RIGHT_GRIP_TOUCH);
 	}
 
 	k_mutex_lock(&olympus_report_mutex, K_FOREVER);
