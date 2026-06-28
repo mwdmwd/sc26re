@@ -61,9 +61,10 @@ FW_BEGIN_RETRY_DELAY_SECONDS = 2
 MESSAGE_UICR_PROVISION = 0x1238
 UICR_PROVISION_KEY = 0xE86DA4C7
 UICR_CUSTOMER_SIZE = 128
-PROVISIONING_MAGIC = {
-    "ibex": 0xAC32A429,
-    "proteus": 0xAC388E29,
+COMMON_PROVISIONING_MAGIC = 0xAC32A429
+PROVISIONING_MAGICS_FOR_CLASS = {
+    "ibex": (COMMON_PROVISIONING_MAGIC,),
+    "proteus": (COMMON_PROVISIONING_MAGIC, 0xAC388E29),
 }
 
 TYPE_TRITON_BL = 0
@@ -987,7 +988,7 @@ def parse_boot_info_response(port: str, fw_class: str, response: bytes) -> BootI
     if len(response) != 164:
         raise ToolError(f"ERROR: BAD INFO RESPONSE: {response.hex()}")
     magic = struct.unpack_from("<I", response, 36)[0]
-    if magic != PROVISIONING_MAGIC.get(fw_class):
+    if magic not in PROVISIONING_MAGICS_FOR_CLASS.get(fw_class, (COMMON_PROVISIONING_MAGIC,)):
         return BootInfo(port, fw_class, 0, "None", "None", response)
     hw_id = struct.unpack_from("<I", response, 40)[0]
     unit_serial = decode_serial_field(response[44:60])
