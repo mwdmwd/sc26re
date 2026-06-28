@@ -1335,7 +1335,9 @@ def flash_device(device: Device, firmware: FirmwareImage, args: argparse.Namespa
         flash_bootloader_port(device.bootloader_port, firmware, verbose=args.verbose)
         return
 
-    cfw_nvs_backup = try_save_cfw_nvs_from_device(device, verbose=args.verbose)
+    # Only Ibex has custom firmware for now.
+    if device.fw_class == "ibex":
+        cfw_nvs_backup = try_save_cfw_nvs_from_device(device, verbose=args.verbose)
     send_hid_reboot_to_bootloader(device)
     time.sleep(4)
     for bl in enumerate_bootloader_devices(verbose=args.verbose):
