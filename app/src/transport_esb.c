@@ -45,6 +45,7 @@ enum
 	ESB_CHANNEL_UNUSED = 0xff,
 	ESB_CHANNEL_SCAN_INITIAL_MS = 328,
 	ESB_CHANNEL_SCAN_INTERVAL_MS = 426,
+	ESB_LEGACY_FEATURE_FALLBACK_MS = 50,
 };
 
 static const uint8_t discovery_base[] = { 'i', 'b', 'e', 'x' };
@@ -63,10 +64,13 @@ static int32_t pending_write_result;
 static bool pending_write_result_valid;
 static uint32_t pending_feature_generation;
 static uint32_t pending_write_generation;
+static uint32_t last_feature_generation;
+static uint32_t legacy_feature_fallback_generation;
 static uint8_t report_sequence;
 static bool latest_input_valid;
 static bool latest_battery_valid;
 static bool session_pending;
+static bool legacy_feature_fallback_pending;
 static uint8_t pending_channel;
 static uint8_t pending_base[4];
 static uint8_t pending_prefix;
@@ -98,6 +102,11 @@ enum
 };
 static uint8_t rejected_host_frame_logs_remaining = 8;
 static uint8_t unknown_host_opcode_logs_remaining = 8;
+
+static void queue_latest_input(uint8_t requested_report_id);
+static void feature_response_fallback_work_handler(struct k_work *work);
+
+K_WORK_DELAYABLE_DEFINE(feature_response_fallback_work, feature_response_fallback_work_handler);
 
 static int esb_settings_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
@@ -424,19 +433,111 @@ static void stage_feature_response(const uint8_t *response, size_t response_len)
 
 static void remember_feature_response(const uint8_t *response, size_t response_len)
 {
+	k_spinlock_key_t key;
+
 	if(response_len > sizeof(last_feature_response))
 	{
 		response_len = sizeof(last_feature_response);
 	}
 
+	key = k_spin_lock(&latest_input_lock);
 	memcpy(last_feature_response, response, response_len);
 	last_feature_response_len = response_len;
+	last_feature_generation++;
+	k_spin_unlock(&latest_input_lock, key);
 }
 
 static void clear_last_feature_response(void)
 {
+	k_spinlock_key_t key;
+
+	key = k_spin_lock(&latest_input_lock);
 	memset(last_feature_response, 0, sizeof(last_feature_response));
 	last_feature_response_len = 0;
+	last_feature_generation++;
+	legacy_feature_fallback_pending = false;
+	k_spin_unlock(&latest_input_lock, key);
+	(void)k_work_cancel_delayable(&feature_response_fallback_work);
+}
+
+/* PROTEUS_FW_6A3BFE78 and newer only accept subtype-4 feature responses after issuing a
+ * subtype-3 ESB_APP_REPORT_READ. */
+static bool copy_last_feature_response(uint8_t *response, size_t *response_len)
+{
+	k_spinlock_key_t key;
+	bool copied = false;
+
+	key = k_spin_lock(&latest_input_lock);
+	if(last_feature_response_len != 0)
+	{
+		memcpy(response, last_feature_response, last_feature_response_len);
+		*response_len = last_feature_response_len;
+		legacy_feature_fallback_pending = false;
+		copied = true;
+	}
+	k_spin_unlock(&latest_input_lock, key);
+
+	if(copied)
+	{
+		(void)k_work_cancel_delayable(&feature_response_fallback_work);
+	}
+	return copied;
+}
+
+/* PROTEUS_FW_6A18D053 and older send GET_FEATURE as subtype-1 and do not follow with subtype-3.
+ * Give newer pucks a short chance to request the response, then send it unprompted. */
+static void schedule_legacy_feature_response_fallback(void)
+{
+	k_spinlock_key_t key;
+	bool pending;
+
+	key = k_spin_lock(&latest_input_lock);
+	pending = last_feature_response_len != 0;
+	legacy_feature_fallback_generation = last_feature_generation;
+	legacy_feature_fallback_pending = pending;
+	k_spin_unlock(&latest_input_lock, key);
+
+	if(pending)
+	{
+		(void)k_work_reschedule(&feature_response_fallback_work,
+		                        K_MSEC(ESB_LEGACY_FEATURE_FALLBACK_MS));
+	}
+}
+
+static bool copy_legacy_feature_fallback(uint8_t *response, size_t *response_len)
+{
+	k_spinlock_key_t key;
+	bool copied = false;
+
+	key = k_spin_lock(&latest_input_lock);
+	if(legacy_feature_fallback_pending &&
+	   legacy_feature_fallback_generation == last_feature_generation &&
+	   last_feature_response_len != 0)
+	{
+		memcpy(response, last_feature_response, last_feature_response_len);
+		*response_len = last_feature_response_len;
+		legacy_feature_fallback_pending = false;
+		copied = true;
+	}
+	k_spin_unlock(&latest_input_lock, key);
+	return copied;
+}
+
+static void feature_response_fallback_work_handler(struct k_work *work)
+{
+	uint8_t response[ESB_FEATURE_REPORT_SIZE];
+	size_t response_len;
+
+	ARG_UNUSED(work);
+
+	if(!copy_legacy_feature_fallback(response, &response_len))
+	{
+		return;
+	}
+
+	LOG_DBG("legacy E3 feature fallback for 0x%02x", response[0]);
+	stage_feature_response(response, response_len);
+	queue_latest_input(ESB_REPORT_45_ID);
 }
 
 static void stage_write_result(int32_t result)
@@ -480,6 +581,9 @@ static void handle_host_poll(const struct valve_esb_payload *payload)
 	static uint8_t diagnostic_logs_remaining = 20;
 	size_t index = 1;
 	uint8_t requested_report_id = 0;
+	uint8_t deferred_feature_response[ESB_FEATURE_REPORT_SIZE];
+	size_t deferred_feature_response_len = 0;
+	bool deferred_feature_response_valid = false;
 
 	polls_received++;
 	if(diagnostic_logs_remaining != 0 && !(payload->length == 5 &&
@@ -515,21 +619,19 @@ static void handle_host_poll(const struct valve_esb_payload *payload)
 					break;
 				}
 
+				deferred_feature_response_valid = false;
 				n = valve_feature_respond(VALVE_FEATURE_LINK_ESB, body, body_len,
 				                          esb_feature_response, sizeof(esb_feature_response));
 
 				if(n >= 0)
 				{
 					remember_feature_response(esb_feature_response, n);
-					if(feature_request_expects_response(body, body_len) ||
-					   esb_feature_response[1] != 0)
+					/* For PROTEUS_FW_6A18D053 and below */
+					if(feature_request_expects_response(body, body_len))
 					{
-						stage_feature_response(esb_feature_response, n);
+						schedule_legacy_feature_response_fallback();
 					}
-					else
-					{
-						stage_write_result(0);
-					}
+					stage_write_result(0);
 				}
 				else
 				{
@@ -539,19 +641,30 @@ static void handle_host_poll(const struct valve_esb_payload *payload)
 				break;
 			}
 			case ESB_APP_REPORT_READ:
-				if(last_feature_response_len != 0)
+			{
+				uint8_t response[ESB_FEATURE_REPORT_SIZE];
+				size_t response_len;
+
+				ARG_UNUSED(body);
+				ARG_UNUSED(body_len);
+
+				if(copy_last_feature_response(response, &response_len))
 				{
-					stage_feature_response(last_feature_response, last_feature_response_len);
+					memcpy(deferred_feature_response, response, response_len);
+					deferred_feature_response_len = response_len;
+					deferred_feature_response_valid = true;
 				}
 				else
 				{
 					LOG_DBG("E3 feature read requested with no pending response");
 				}
 				break;
+			}
 			case ESB_APP_LEGACY_SET:
 			{
 				ssize_t n;
 
+				deferred_feature_response_valid = false;
 				n = valve_feature_respond(VALVE_FEATURE_LINK_ESB, body, body_len,
 				                          esb_feature_response, sizeof(esb_feature_response));
 				stage_write_result(n >= 0 ? 0 : (int32_t)n);
@@ -564,6 +677,10 @@ static void handle_host_poll(const struct valve_esb_payload *payload)
 		index += body_len + 2;
 	}
 
+	if(deferred_feature_response_valid)
+	{
+		stage_feature_response(deferred_feature_response, deferred_feature_response_len);
+	}
 	queue_latest_input(requested_report_id);
 }
 
@@ -718,6 +835,7 @@ void transport_esb_deactivate(void)
 		k_work_cancel(&channel_map_work);
 		k_work_cancel(&session_work);
 		k_work_cancel_delayable(&channel_scan_work);
+		k_work_cancel_delayable(&feature_response_fallback_work);
 	}
 	else
 	{
@@ -725,6 +843,7 @@ void transport_esb_deactivate(void)
 		k_work_cancel_sync(&channel_map_work, &sync);
 		k_work_cancel_sync(&session_work, &sync);
 		k_work_cancel_delayable_sync(&channel_scan_work, &sync);
+		k_work_cancel_delayable_sync(&feature_response_fallback_work, &sync);
 	}
 
 	stop_and_flush();
