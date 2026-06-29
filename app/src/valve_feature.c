@@ -18,7 +18,8 @@
 LOG_MODULE_REGISTER(valve_feature);
 
 #define VALVE_SETTINGS_PATH_MAX 24
-#define VALVE_PROTOCOL_BUILD_TIMESTAMP 0x6a18d057
+#define VALVE_PROTOCOL_BUILD_TIMESTAMP 0x6a3bfe74
+#define VALVE_PROTOCOL_BUILD_SHA "a371f66dd017"
 #define VALVE_BLE_CAPABILITIES 0x68d2f92e
 #define VALVE_BLE_HARDWARE_ID 0x49
 #define VALVE_USB_PRODUCT_ID 0x1302
@@ -261,7 +262,11 @@ static void prepare_string_attribute(enum valve_feature_link link, const uint8_t
 	}
 	else if(tag == 3)
 	{
-		append_string_attr(cursor, tag, valve_identity_board_id());
+		append_string_attr(cursor, tag, VALVE_PROTOCOL_BUILD_SHA);
+	}
+	else if(tag == 4)
+	{
+		append_string_attr(cursor, tag, valve_identity_serial(VALVE_IDENTITY_BOARD_SERIAL));
 	}
 	else
 	{
@@ -279,7 +284,7 @@ static void prepare_version_attribute(const uint8_t *request, size_t len, uint8_
 		sys_put_le32(VALVE_BLE_HARDWARE_ID, *cursor);
 		*cursor += sizeof(uint32_t);
 		memset(*cursor, 0, 16);
-		memcpy(*cursor, valve_identity_board_id(), MIN(strlen(valve_identity_board_id()), 16));
+		memcpy(*cursor, VALVE_PROTOCOL_BUILD_SHA, MIN(strlen(VALVE_PROTOCOL_BUILD_SHA), 16));
 		*cursor += 16;
 		memset(*cursor, 0, 16);
 		memcpy(*cursor, valve_identity_serial(VALVE_IDENTITY_UNIT_SERIAL),
@@ -289,9 +294,9 @@ static void prepare_version_attribute(const uint8_t *request, size_t len, uint8_
 	else if(len > 2 && request[2] == 1)
 	{
 		static const uint8_t variant_1[] = {
-			0x01, 0x00, 0xff, 0x17, 0xfe, 0x69, 0x65, 0x32, 0x35, 0x39, 0x64, 0x63,
-			0x36, 0x62, 0x63, 0x61, 0x62, 0x35, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00,
-			0x00, 0x00, 0x70, 0x94, 0x03, 0x00, 0x49, 0x1f, 0x02, 0x00,
+			0x01, 0x00, 0x74, 0xfe, 0x3b, 0x6a, 0x61, 0x33, 0x37, 0x31, 0x66, 0x36,
+			0x36, 0x64, 0x64, 0x30, 0x31, 0x37, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 		};
 
 		memcpy(*cursor, variant_1, sizeof(variant_1));
@@ -299,12 +304,11 @@ static void prepare_version_attribute(const uint8_t *request, size_t len, uint8_
 	}
 	else if(len > 2 && request[2] == 2)
 	{
-		static const uint8_t variant_2[] = {
-			0x02, 0xa0, 0x05, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,
-		};
-
-		memcpy(*cursor, variant_2, sizeof(variant_2));
-		*cursor += sizeof(variant_2);
+		*(*cursor)++ = 2;
+		sys_put_le32(k_uptime_get_32(), *cursor);
+		*cursor += sizeof(uint32_t);
+		sys_put_le32(0, *cursor);
+		*cursor += sizeof(uint32_t);
 	}
 }
 
