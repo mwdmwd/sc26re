@@ -613,10 +613,11 @@ static size_t feature_response_min_capacity(enum valve_feature_link link)
 	switch(link)
 	{
 		case VALVE_FEATURE_LINK_USB:
+		case VALVE_FEATURE_LINK_ESB:
 		case VALVE_FEATURE_LINK_PUCK:
 			return VALVE_FEATURE_REPORT_SIZE - 1;
+		/* XXX maybe the actual value is one lower? */
 		case VALVE_FEATURE_LINK_BLE:
-		case VALVE_FEATURE_LINK_ESB:
 		default:
 			return VALVE_FEATURE_REPORT_SIZE;
 	}
