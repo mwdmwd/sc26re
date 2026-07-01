@@ -20,12 +20,14 @@ static uint8_t saved_personality;
 
 static uint8_t radio_personality_to_marker(enum radio_personality personality)
 {
-	if(personality == RADIO_PERSONALITY_ESB)
+	switch(personality)
 	{
-		return RADIO_PERSONALITY_GPREGRET_ESB;
+		case RADIO_PERSONALITY_ESB:
+			return RADIO_PERSONALITY_GPREGRET_ESB;
+		case RADIO_PERSONALITY_BLE:
+			return RADIO_PERSONALITY_GPREGRET_BLE;
 	}
-
-	return RADIO_PERSONALITY_GPREGRET_BLE;
+	__builtin_unreachable();
 }
 
 static enum radio_personality radio_personality_from_marker(uint8_t marker)
@@ -35,13 +37,18 @@ static enum radio_personality radio_personality_from_marker(uint8_t marker)
 		return RADIO_PERSONALITY_ESB;
 	}
 
-	return RADIO_PERSONALITY_BLE;
+	if(IS_ENABLED(CONFIG_IBEX_BLE) && marker == RADIO_PERSONALITY_GPREGRET_BLE)
+	{
+		return RADIO_PERSONALITY_BLE;
+	}
+
+	return IS_ENABLED(CONFIG_IBEX_ESB) ? RADIO_PERSONALITY_ESB : RADIO_PERSONALITY_BLE;
 }
 
 static bool radio_personality_marker_is_valid(uint8_t marker)
 {
-	return marker == RADIO_PERSONALITY_GPREGRET_BLE ||
-	       (IS_ENABLED(CONFIG_IBEX_ESB) && marker == RADIO_PERSONALITY_GPREGRET_ESB);
+	return (IS_ENABLED(CONFIG_IBEX_ESB) && marker == RADIO_PERSONALITY_GPREGRET_ESB) ||
+	       (IS_ENABLED(CONFIG_IBEX_BLE) && marker == RADIO_PERSONALITY_GPREGRET_BLE);
 }
 
 static int persisted_personality_set(const char *name, size_t len, settings_read_cb read_cb,
@@ -129,9 +136,10 @@ const char *radio_personality_name(void)
 	{
 		case RADIO_PERSONALITY_ESB:
 			return "ESB";
-		default:
+		case RADIO_PERSONALITY_BLE:
 			return "BLE";
 	}
+	__builtin_unreachable();
 }
 
 void radio_personality_reboot_into(enum radio_personality personality)

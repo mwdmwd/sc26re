@@ -136,7 +136,7 @@ static int transport_start_radio(void)
 		}
 	}
 
-	if(IS_ENABLED(CONFIG_IBEX_ESB) && radio_personality_get() != RADIO_PERSONALITY_BLE)
+	if(IS_ENABLED(CONFIG_IBEX_ESB) && radio_personality_get() == RADIO_PERSONALITY_ESB)
 	{
 		err = transport_esb_init();
 		if(err)
@@ -304,7 +304,7 @@ int transport_send(const struct controller_report *report)
 		ble_err = transport_ble_send(report);
 	}
 
-	if(IS_ENABLED(CONFIG_IBEX_ESB) && radio_personality_get() != RADIO_PERSONALITY_BLE)
+	if(IS_ENABLED(CONFIG_IBEX_ESB) && radio_personality_get() == RADIO_PERSONALITY_ESB)
 	{
 		esb_err = transport_esb_send(report);
 	}
@@ -352,7 +352,7 @@ int transport_send_battery_status(const struct controller_battery_report *report
 		ble_err = transport_ble_send_battery_status(report);
 	}
 
-	if(IS_ENABLED(CONFIG_IBEX_ESB) && radio_personality_get() != RADIO_PERSONALITY_BLE)
+	if(IS_ENABLED(CONFIG_IBEX_ESB) && radio_personality_get() == RADIO_PERSONALITY_ESB)
 	{
 		esb_err = transport_esb_send_battery_status(report);
 	}
