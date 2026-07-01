@@ -14,6 +14,7 @@
 #include "power.h"
 #include "puck_interface.h"
 #include "rgbw_led.h"
+#include "watchdog.h"
 
 LOG_MODULE_REGISTER(charge_mode);
 
@@ -50,6 +51,7 @@ static bool steam_power_requested(void)
 	while(k_uptime_get() - start < CHARGE_MODE_STEAM_HOLD_MS)
 	{
 		k_msleep(CHARGE_MODE_CHECK_MS);
+		watchdog_feed();
 		if(!steam_pressed())
 		{
 			return false;
@@ -188,6 +190,7 @@ static enum charge_mode_result charge_mode_delay(uint32_t duration_ms)
 		}
 
 		k_msleep(MIN(CHARGE_MODE_CHECK_MS, duration_ms - elapsed));
+		watchdog_feed();
 	}
 
 	return CHARGE_MODE_SKIPPED;
@@ -244,6 +247,7 @@ static enum charge_mode_result wait_for_usb_or_steam(void)
 			return CHARGE_MODE_USB_CONFIGURED;
 		}
 		k_msleep(CHARGE_MODE_CHECK_MS);
+		watchdog_feed();
 	}
 
 	return steam_power_requested() ? CHARGE_MODE_POWER_ON_RADIO : CHARGE_MODE_SKIPPED;

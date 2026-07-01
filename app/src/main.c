@@ -12,6 +12,7 @@
 #include "ibex_settings_registry.h"
 #include "power.h"
 #include "puck_interface.h"
+#include "watchdog.h"
 
 #if CONFIG_IBEX_RGBW_LED
 #include "rgbw_led.h"
@@ -208,5 +209,6 @@ int main(void)
 		}
 
 		hardware_wait_for_change();
+		watchdog_feed();
 	}
 }

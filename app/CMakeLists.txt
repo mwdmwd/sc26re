@@ -38,8 +38,6 @@ target_sources_ifdef(CONFIG_IBEX_RGBW_LED app PRIVATE src/rgbw_led.c)
 target_sources_ifdef(CONFIG_GPIO_GREENPAK app PRIVATE drivers/gpio/gpio_greenpak.c)
 
 if(CONFIG_BOARD_STEAM_CONTROLLER_IBEX)
-	target_sources(app PRIVATE src/valve_bootloader.c)
-
 	string(REGEX REPLACE "^0[xX]" "" IBEX_FW_TIMESTAMP "${CONFIG_IBEX_BUILD_TIMESTAMP}")
 	string(TOUPPER "${IBEX_FW_TIMESTAMP}" IBEX_FW_TIMESTAMP)
 	set(IBEX_FW_NAME "IBEX_CUSTOM_${IBEX_FW_TIMESTAMP}.fw")

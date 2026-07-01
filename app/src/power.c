@@ -17,6 +17,7 @@
 #include "controller.h"
 #include "power.h"
 #include "rgbw_led.h"
+#include "watchdog.h"
 
 #define VALVE_ISP_MAGIC_BASE 0x2001fff0u
 #define POWER_OFF_RELEASE_POLL_MS 20
@@ -141,6 +142,7 @@ void power_off_after_buttons_released(uint32_t release_mask)
 		{
 			hardware_wait_for_change();
 			k_msleep(POWER_OFF_RELEASE_POLL_MS);
+			watchdog_feed();
 		}
 		k_msleep(POWER_OFF_RELEASE_DEBOUNCE_MS);
 	}
