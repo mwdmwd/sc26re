@@ -7,12 +7,15 @@
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include <zephyr/irq.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/util.h>
 
 #include "esb_backend.h"
 
 #define RX_FIFO_SIZE 8
 #define TX_FIFO_SIZE 2
+#define ESB_EVENT_THREAD_STACK_SIZE 2048
+#define ESB_EVENT_THREAD_PRIORITY 10
 #define NRF_RADIO_BASE_FREQUENCY_MHZ 2400
 #define RADIO_DISABLED_TIMEOUT_US 3000
 
@@ -21,6 +24,9 @@ static uint8_t rx_dma[VALVE_ESB_BACKEND_MAX_PAYLOAD_SIZE + 2];
 static uint8_t tx_dma[VALVE_ESB_BACKEND_MAX_PAYLOAD_SIZE + 2];
 static struct valve_esb_payload rx_fifo[RX_FIFO_SIZE];
 static struct valve_esb_payload tx_fifo[TX_FIFO_SIZE];
+static K_THREAD_STACK_DEFINE(event_thread_stack, ESB_EVENT_THREAD_STACK_SIZE);
+static struct k_thread event_thread;
+static struct k_sem event_sem;
 static uint8_t rx_head;
 static uint8_t rx_tail;
 static uint8_t rx_count;
@@ -43,6 +49,9 @@ static volatile uint32_t end_events;
 static volatile uint32_t crc_ok_events;
 static volatile uint32_t crc_bad_events;
 static volatile uint32_t rx_dropped_events;
+static atomic_t pending_tx_success_events;
+static atomic_t pending_rx_received_events;
+static bool event_thread_started;
 
 static uint8_t bitrev8(uint8_t value)
 {
@@ -107,6 +116,61 @@ static void emit_event(enum valve_esb_backend_event_id event_id)
 	{
 		backend_event_handler(&event);
 	}
+}
+
+static void signal_event(enum valve_esb_backend_event_id event_id)
+{
+	switch(event_id)
+	{
+		case VALVE_ESB_EVENT_TX_SUCCESS:
+			atomic_inc(&pending_tx_success_events);
+			break;
+		case VALVE_ESB_EVENT_RX_RECEIVED:
+			atomic_inc(&pending_rx_received_events);
+			break;
+		default:
+			break;
+	}
+
+	k_sem_give(&event_sem);
+}
+
+static void event_thread_entry(void *p1, void *p2, void *p3)
+{
+	ARG_UNUSED(p1);
+	ARG_UNUSED(p2);
+	ARG_UNUSED(p3);
+
+	for(;;)
+	{
+		k_sem_take(&event_sem, K_FOREVER);
+
+		while(atomic_get(&pending_tx_success_events) > 0)
+		{
+			atomic_dec(&pending_tx_success_events);
+			emit_event(VALVE_ESB_EVENT_TX_SUCCESS);
+		}
+		while(atomic_get(&pending_rx_received_events) > 0)
+		{
+			atomic_dec(&pending_rx_received_events);
+			emit_event(VALVE_ESB_EVENT_RX_RECEIVED);
+		}
+	}
+}
+
+static void ensure_event_thread_started(void)
+{
+	if(event_thread_started)
+	{
+		return;
+	}
+
+	k_sem_init(&event_sem, 0, K_SEM_MAX_LIMIT);
+	k_thread_create(&event_thread, event_thread_stack, K_THREAD_STACK_SIZEOF(event_thread_stack),
+	                event_thread_entry, NULL, NULL, NULL, K_PRIO_PREEMPT(ESB_EVENT_THREAD_PRIORITY),
+	                0, K_NO_WAIT);
+	k_thread_name_set(&event_thread, "esb_events");
+	event_thread_started = true;
 }
 
 static void apply_address(void)
@@ -243,7 +307,7 @@ static void radio_isr(const void *arg)
 	if(tx_active)
 	{
 		tx_active = false;
-		emit_event(VALVE_ESB_EVENT_TX_SUCCESS);
+		signal_event(VALVE_ESB_EVENT_TX_SUCCESS);
 		if(rx_running)
 		{
 			restart_rx();
@@ -318,7 +382,7 @@ static void radio_isr(const void *arg)
 
 	if(rx_received)
 	{
-		emit_event(VALVE_ESB_EVENT_RX_RECEIVED);
+		signal_event(VALVE_ESB_EVENT_RX_RECEIVED);
 	}
 }
 
@@ -331,6 +395,9 @@ int valve_esb_backend_init(const struct valve_esb_backend_config *config)
 		return err;
 	}
 
+	ensure_event_thread_started();
+	atomic_set(&pending_tx_success_events, 0);
+	atomic_set(&pending_rx_received_events, 0);
 	backend_event_handler = config->event_handler;
 	IRQ_CONNECT(RADIO_IRQn, 1, radio_isr, NULL, 0);
 	irq_enable(RADIO_IRQn);
