@@ -17,7 +17,11 @@ ZEPHYR_SDK_ARM_GCC := $(ZEPHYR_SDK_DIR)/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc
 ZEPHYR_TOOLCHAIN_VARIANT ?= zephyr
 ZEPHYR_WEST_CONFIG := $(ZEPHYR_WORKSPACE)/.west/config
 ZEPHYR_WEST_UPDATE_STAMP := $(ZEPHYR_WORKSPACE)/.west/sc26re-update.stamp
+ZEPHYR_PATCH_STATE := $(ZEPHYR_WORKSPACE)/.west/sc26re-patches.applied
 ZEPHYR_MANIFEST := $(ZEPHYR_WORKSPACE)/manifest/west.yml
+ZEPHYR_PATCH_BASE := manifest-rev
+ZEPHYR_PATCH_DIR := $(CURDIR)/patches
+ZEPHYR_PATCHES := $(sort $(wildcard $(ZEPHYR_PATCH_DIR)/*.patch))
 # App build options
 PRISTINE ?= 0
 ZEPHYR_PRISTINE := $(if $(filter 1 yes true always,$(PRISTINE)),always,auto)
@@ -246,7 +250,7 @@ $(BOOTSTUB_BUILD_DIR)/ibex-microbit.bin: $(BOOTSTUB_BUILD_DIR)/ibex-microbit.elf
 zephyr-seeds: $(addprefix zephyr-,$(ZEPHYR_SEEDS))
 
 .PHONY: zephyr-workspace
-zephyr-workspace: $(ZEPHYR_WEST_UPDATE_STAMP)
+zephyr-workspace: $(ZEPHYR_PATCH_STATE)
 
 $(ZEPHYR_WEST_CONFIG):
 	cd "$(ZEPHYR_WORKSPACE)" && $(WEST) init -l manifest
@@ -255,6 +259,70 @@ $(ZEPHYR_WEST_UPDATE_STAMP): $(ZEPHYR_MANIFEST) | $(ZEPHYR_WEST_CONFIG)
 	cd "$(ZEPHYR_WORKSPACE)" && $(WEST) update
 	cd "$(ZEPHYR_WORKSPACE)" && $(WEST) manifest --validate
 	touch "$@"
+
+$(ZEPHYR_PATCH_STATE): $(ZEPHYR_WEST_UPDATE_STAMP) $(ZEPHYR_PATCHES)
+	@set -e; \
+	state="$@"; \
+	known_ids="$$state.ids"; \
+	if [ ! -f "$$state" ]; then \
+		: > "$$state"; \
+	fi; \
+	: > "$$known_ids"; \
+	git -C "$(ZEPHYR_WORKSPACE)/zephyr" log --format=%H --max-count=256 | while read commit; do \
+		git -C "$(ZEPHYR_WORKSPACE)/zephyr" show --format= "$$commit" | git patch-id --stable | sed 's/ .*//' >> "$$known_ids"; \
+	done; \
+	if [ -n "$(ZEPHYR_PATCHES)" ]; then \
+		for patch in $(ZEPHYR_PATCHES); do \
+			patch_sum=$$(sha256sum "$$patch"); \
+			patch_id=$$(git patch-id --stable < "$$patch" | sed 's/ .*//'); \
+			if grep -Fxq "$$patch_sum" "$$state"; then \
+				continue; \
+			fi; \
+			if grep -Fq "  $$patch" "$$state"; then \
+				printf 'patch changed after being applied: %s\n' "$$patch" >&2; \
+				printf 'reset the Zephyr workspace before rebuilding this patch stack\n' >&2; \
+				exit 1; \
+			fi; \
+			if grep -Fxq "$$patch_id" "$$known_ids" || git -C "$(ZEPHYR_WORKSPACE)/zephyr" apply --reverse --check "$$patch" >/dev/null 2>&1; then \
+				sha256sum "$$patch" >> "$$state"; \
+				continue; \
+			fi; \
+			git -C "$(ZEPHYR_WORKSPACE)/zephyr" am --whitespace=nowarn "$$patch"; \
+			sha256sum "$$patch" >> "$$state"; \
+		done; \
+	fi; \
+	touch "$@"
+
+.PHONY: zephyr-patches-update
+zephyr-patches-update: $(ZEPHYR_WEST_UPDATE_STAMP)
+	@set -e; \
+	zephyr_tree="$(ZEPHYR_WORKSPACE)/zephyr"; \
+	patch_dir="$(ZEPHYR_PATCH_DIR)"; \
+	patch_state="$(ZEPHYR_PATCH_STATE)"; \
+	tmp_dir=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp_dir"' EXIT; \
+	if ! git -C "$$zephyr_tree" diff --quiet || ! git -C "$$zephyr_tree" diff --cached --quiet; then \
+		printf 'Zephyr tree has uncommitted changes; commit or stash them before exporting patches\n' >&2; \
+		exit 1; \
+	fi; \
+	mkdir -p "$$patch_dir" "$$(dirname "$$patch_state")"; \
+	git -C "$$zephyr_tree" format-patch --no-stat --no-signature --no-numbered \
+		--output-directory "$$tmp_dir" "$(ZEPHYR_PATCH_BASE)..HEAD"; \
+	for patch in "$$tmp_dir"/*.patch; do \
+		[ -e "$$patch" ] || continue; \
+		sed -i '1s/^From [0-9a-f]\{40\} /From 0000000000000000000000000000000000000000 /' "$$patch"; \
+	done; \
+	find "$$patch_dir" -maxdepth 1 -name '*.patch' -delete; \
+	for patch in "$$tmp_dir"/*.patch; do \
+		[ -e "$$patch" ] || continue; \
+		cp "$$patch" "$$patch_dir/"; \
+	done; \
+	: > "$$patch_state"; \
+	for patch in "$$patch_dir"/*.patch; do \
+		[ -e "$$patch" ] || continue; \
+		sha256sum "$$patch" >> "$$patch_state"; \
+	done; \
+	touch "$$patch_state"
 
 .PHONY: zephyr-sdk-arm
 zephyr-sdk-arm:

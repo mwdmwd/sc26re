@@ -1,0 +1,676 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SC26re user <@>
+Date: Sat, 4 Jul 2026 19:09:00 +0200
+Subject: [PATCH] drivers: sensor: lsm6dsv16x: Add SFLP FIFO support
+
+
+diff --git a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.c b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.c
+index 26066e0ce1c..f7e47c2c042 100644
+--- a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.c
++++ b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.c
+@@ -10,18 +10,28 @@
+ 
+ #define DT_DRV_COMPAT st_lsm6dsv16x
+ 
++#include <math.h>
+ #include <zephyr/drivers/sensor.h>
+ #include <zephyr/kernel.h>
+ #include <zephyr/device.h>
+ #include <zephyr/init.h>
+ #include <string.h>
+ #include <zephyr/sys/__assert.h>
++#include <zephyr/sys/byteorder.h>
+ #include <zephyr/logging/log.h>
+ 
+ #include "lsm6dsv16x.h"
+ 
+ LOG_MODULE_REGISTER(LSM6DSV16X, CONFIG_SENSOR_LOG_LEVEL);
+ 
++#define LSM6DSV16X_DEGREES_PER_RADIAN    57.29577951308232
++#define LSM6DSV16X_TIMESTAMP_US_PER_TICK 21U
++#define LSM6DSV16X_ODR_RATE_MASK         0x0f
++#define LSM6DSV16X_ODR_MODE_MASK         0xf0
++#define LSM6DSV16X_ODR_MODE_HP           0x00
++#define LSM6DSV16X_ODR_MODE_HA01         0x10
++#define LSM6DSV16X_ODR_MODE_HA02         0x20
++
+ /*
+  * values taken from lsm6dsv16x_data_rate_t in hal/st module. The mode/accuracy
+  * should be selected through accel-odr property in DT
+@@ -101,6 +111,61 @@ static int lsm6dsv16x_gyro_range_to_fs_val(int32_t range)
+ 	return -EINVAL;
+ }
+ 
++static int16_t lsm6dsv16x_fifo_raw_axis(const uint8_t raw[6], uint8_t axis)
++{
++	return (int16_t)sys_get_le16(&raw[axis * 2]);
++}
++
++static void lsm6dsv16x_fifo_copy_axes(int16_t dst[3], const uint8_t raw[6])
++{
++	for (uint8_t i = 0; i < 3; i++) {
++		dst[i] = lsm6dsv16x_fifo_raw_axis(raw, i);
++	}
++}
++
++static float lsm6dsv16x_sflp_half_to_float(uint16_t raw)
++{
++	uint16_t sign = raw & BIT(15);
++	uint16_t exp = (raw >> 10) & 0x1f;
++	uint16_t mant = raw & 0x03ff;
++	float value;
++
++	if (exp == 0) {
++		value = ldexpf((float)mant, -24);
++	} else if (exp == 0x1f) {
++		value = 1.0f;
++	} else {
++		value = ldexpf(1.0f + (float)mant / 1024.0f, (int)exp - 15);
++	}
++
++	return sign ? -value : value;
++}
++
++static int lsm6dsv16x_odr_to_fifo_batch(uint8_t odr)
++{
++	uint8_t batch = odr & LSM6DSV16X_ODR_RATE_MASK;
++
++	if (batch > LSM6DSV16X_XL_BATCHED_AT_7680Hz) {
++		return -EINVAL;
++	}
++
++	switch (odr & LSM6DSV16X_ODR_MODE_MASK) {
++	case LSM6DSV16X_ODR_MODE_HP:
++		break;
++	case LSM6DSV16X_ODR_MODE_HA01:
++	case LSM6DSV16X_ODR_MODE_HA02:
++		if (batch < LSM6DSV16X_XL_BATCHED_AT_15Hz) {
++			return -EINVAL;
++		}
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	/* FIFO batching encodes the rate field without the ODR accuracy mode. */
++	return batch;
++}
++
+ static int lsm6dsv16x_accel_set_fs_raw(const struct device *dev, uint8_t fs)
+ {
+ 	const struct lsm6dsv16x_config *cfg = dev->config;
+@@ -139,6 +204,12 @@ static int lsm6dsv16x_accel_set_odr_raw(const struct device *dev, uint8_t odr)
+ 	const struct lsm6dsv16x_config *cfg = dev->config;
+ 	stmdev_ctx_t *ctx = (stmdev_ctx_t *)&cfg->ctx;
+ 	struct lsm6dsv16x_data *data = dev->data;
++	int fifo_batch;
++
++	fifo_batch = lsm6dsv16x_odr_to_fifo_batch(odr);
++	if (fifo_batch < 0) {
++		return fifo_batch;
++	}
+ 
+ 	if (lsm6dsv16x_xl_data_rate_set(ctx, odr) < 0) {
+ 		return -EIO;
+@@ -146,6 +217,10 @@ static int lsm6dsv16x_accel_set_odr_raw(const struct device *dev, uint8_t odr)
+ 
+ 	data->accel_freq = odr;
+ 
++	if (lsm6dsv16x_fifo_xl_batch_set(ctx, (lsm6dsv16x_fifo_xl_batch_t)fifo_batch) < 0) {
++		return -EIO;
++	}
++
+ 	return 0;
+ }
+ 
+@@ -165,11 +240,21 @@ static int lsm6dsv16x_gyro_set_odr_raw(const struct device *dev, uint8_t odr)
+ {
+ 	const struct lsm6dsv16x_config *cfg = dev->config;
+ 	stmdev_ctx_t *ctx = (stmdev_ctx_t *)&cfg->ctx;
++	int fifo_batch;
++
++	fifo_batch = lsm6dsv16x_odr_to_fifo_batch(odr);
++	if (fifo_batch < 0) {
++		return fifo_batch;
++	}
+ 
+ 	if (lsm6dsv16x_gy_data_rate_set(ctx, odr) < 0) {
+ 		return -EIO;
+ 	}
+ 
++	if (lsm6dsv16x_fifo_gy_batch_set(ctx, (lsm6dsv16x_fifo_gy_batch_t)fifo_batch) < 0) {
++		return -EIO;
++	}
++
+ 	return 0;
+ }
+ 
+@@ -297,6 +382,24 @@ static int lsm6dsv16x_gyro_range_set(const struct device *dev, int32_t range)
+ 	return 0;
+ }
+ 
++static int lsm6dsv16x_gyro_offset_set(const struct device *dev, const struct sensor_value *val)
++{
++	const struct lsm6dsv16x_config *cfg = dev->config;
++	stmdev_ctx_t *ctx = (stmdev_ctx_t *)&cfg->ctx;
++	lsm6dsv16x_sflp_gbias_t gbias = {
++		.gbias_x = sensor_value_to_double(&val[0]) * LSM6DSV16X_DEGREES_PER_RADIAN,
++		.gbias_y = sensor_value_to_double(&val[1]) * LSM6DSV16X_DEGREES_PER_RADIAN,
++		.gbias_z = sensor_value_to_double(&val[2]) * LSM6DSV16X_DEGREES_PER_RADIAN,
++	};
++
++	if (lsm6dsv16x_sflp_game_gbias_set(ctx, &gbias) < 0) {
++		LOG_DBG("failed to set SFLP gyro bias");
++		return -EIO;
++	}
++
++	return 0;
++}
++
+ static int lsm6dsv16x_gyro_config(const struct device *dev, enum sensor_channel chan,
+ 				  enum sensor_attribute attr, const struct sensor_value *val)
+ {
+@@ -309,6 +412,8 @@ static int lsm6dsv16x_gyro_config(const struct device *dev, enum sensor_channel
+ 		return lsm6dsv16x_gyro_range_set(dev, sensor_rad_to_degrees(val));
+ 	case SENSOR_ATTR_SAMPLING_FREQUENCY:
+ 		return lsm6dsv16x_gyro_odr_set(dev, val->val1);
++	case SENSOR_ATTR_OFFSET:
++		return lsm6dsv16x_gyro_offset_set(dev, val);
+ 	case SENSOR_ATTR_CONFIGURATION:
+ 		switch (val->val1) {
+ 		case 0: /* High Performance */
+@@ -395,6 +500,80 @@ static int lsm6dsv16x_sample_fetch_gyro(const struct device *dev)
+ 	return 0;
+ }
+ 
++static int lsm6dsv16x_sample_fetch_fifo(const struct device *dev, bool *accel_updated,
++					bool *gyro_updated)
++{
++	const struct lsm6dsv16x_config *cfg = dev->config;
++	stmdev_ctx_t *ctx = (stmdev_ctx_t *)&cfg->ctx;
++	struct lsm6dsv16x_data *data = dev->data;
++	lsm6dsv16x_fifo_status_t status;
++	uint16_t level;
++
++	if (accel_updated != NULL) {
++		*accel_updated = false;
++	}
++	if (gyro_updated != NULL) {
++		*gyro_updated = false;
++	}
++
++	if (lsm6dsv16x_fifo_status_get(ctx, &status) < 0) {
++		LOG_DBG("Failed to read FIFO status");
++		return -EIO;
++	}
++
++	level = status.fifo_level;
++	for (uint16_t i = 0; i < level; i++) {
++		lsm6dsv16x_fifo_out_raw_t sample;
++
++		if (lsm6dsv16x_fifo_out_raw_get(ctx, &sample) < 0) {
++			LOG_DBG("Failed to read FIFO sample");
++			return -EIO;
++		}
++
++		switch (sample.tag) {
++		case LSM6DSV16X_FIFO_EMPTY:
++			return 0;
++		case LSM6DSV16X_GY_NC_TAG:
++		case LSM6DSV16X_GY_NC_T_2_TAG:
++		case LSM6DSV16X_GY_NC_T_1_TAG:
++		case LSM6DSV16X_GY_2XC_TAG:
++		case LSM6DSV16X_GY_3XC_TAG:
++			lsm6dsv16x_fifo_copy_axes(data->gyro, sample.data);
++			if (gyro_updated != NULL) {
++				*gyro_updated = true;
++			}
++			break;
++		case LSM6DSV16X_XL_NC_TAG:
++		case LSM6DSV16X_XL_NC_T_2_TAG:
++		case LSM6DSV16X_XL_NC_T_1_TAG:
++		case LSM6DSV16X_XL_2XC_TAG:
++		case LSM6DSV16X_XL_3XC_TAG:
++			lsm6dsv16x_fifo_copy_axes(data->acc, sample.data);
++			if (accel_updated != NULL) {
++				*accel_updated = true;
++			}
++			break;
++		case LSM6DSV16X_TIMESTAMP_TAG:
++			data->timestamp = sys_get_le32(sample.data);
++			data->timestamp_valid = true;
++			break;
++		case LSM6DSV16X_SFLP_GAME_ROTATION_VECTOR_TAG:
++			lsm6dsv16x_fifo_copy_axes(data->sflp_game_rotation, sample.data);
++			data->sflp_game_rotation_valid = true;
++			break;
++		case LSM6DSV16X_SFLP_GYROSCOPE_BIAS_TAG:
++			lsm6dsv16x_fifo_copy_axes(data->sflp_gyro_bias, sample.data);
++			data->sflp_gyro_bias_valid = true;
++			break;
++		default:
++			LOG_DBG("discarding unsupported FIFO tag 0x%x", sample.tag);
++			break;
++		}
++	}
++
++	return 0;
++}
++
+ #if defined(CONFIG_LSM6DSV16X_ENABLE_TEMP)
+ static int lsm6dsv16x_sample_fetch_temp(const struct device *dev)
+ {
+@@ -425,31 +604,58 @@ static int lsm6dsv16x_sample_fetch_shub(const struct device *dev)
+ 
+ static int lsm6dsv16x_sample_fetch(const struct device *dev, enum sensor_channel chan)
+ {
++	int err;
+ #if defined(CONFIG_LSM6DSV16X_SENSORHUB)
+ 	struct lsm6dsv16x_data *data = dev->data;
+ #endif /* CONFIG_LSM6DSV16X_SENSORHUB */
+ 
++	if (chan == (enum sensor_channel)LSM6DSV16X_SENSOR_CHAN_FIFO) {
++		return lsm6dsv16x_sample_fetch_fifo(dev, NULL, NULL);
++	}
++
+ 	switch (chan) {
+ 	case SENSOR_CHAN_ACCEL_XYZ:
+-		lsm6dsv16x_sample_fetch_accel(dev);
++		err = lsm6dsv16x_sample_fetch_accel(dev);
++		if (err) {
++			return err;
++		}
+ 		break;
+ 	case SENSOR_CHAN_GYRO_XYZ:
+-		lsm6dsv16x_sample_fetch_gyro(dev);
++		err = lsm6dsv16x_sample_fetch_gyro(dev);
++		if (err) {
++			return err;
++		}
+ 		break;
+ #if defined(CONFIG_LSM6DSV16X_ENABLE_TEMP)
+ 	case SENSOR_CHAN_DIE_TEMP:
+-		lsm6dsv16x_sample_fetch_temp(dev);
++		err = lsm6dsv16x_sample_fetch_temp(dev);
++		if (err) {
++			return err;
++		}
+ 		break;
+ #endif
+ 	case SENSOR_CHAN_ALL:
+-		lsm6dsv16x_sample_fetch_accel(dev);
+-		lsm6dsv16x_sample_fetch_gyro(dev);
++		err = lsm6dsv16x_sample_fetch_accel(dev);
++		if (err) {
++			return err;
++		}
++
++		err = lsm6dsv16x_sample_fetch_gyro(dev);
++		if (err) {
++			return err;
++		}
+ #if defined(CONFIG_LSM6DSV16X_ENABLE_TEMP)
+-		lsm6dsv16x_sample_fetch_temp(dev);
++		err = lsm6dsv16x_sample_fetch_temp(dev);
++		if (err) {
++			return err;
++		}
+ #endif
+ #if defined(CONFIG_LSM6DSV16X_SENSORHUB)
+ 		if (data->shub_inited) {
+-			lsm6dsv16x_sample_fetch_shub(dev);
++			err = lsm6dsv16x_sample_fetch_shub(dev);
++			if (err) {
++				return err;
++			}
+ 		}
+ #endif
+ 		break;
+@@ -548,6 +754,71 @@ static int lsm6dsv16x_gyro_channel_get(enum sensor_channel chan, struct sensor_v
+ 	return lsm6dsv16x_gyro_get_channel(chan, val, data, data->gyro_gain);
+ }
+ 
++static int lsm6dsv16x_sflp_game_rotation_channel_get(struct sensor_value *val,
++						     struct lsm6dsv16x_data *data)
++{
++	float x = 0.0f;
++	float y = 0.0f;
++	float z = 0.0f;
++	float w = 1.0f;
++
++	if (data->sflp_game_rotation_valid) {
++		x = lsm6dsv16x_sflp_half_to_float((uint16_t)data->sflp_game_rotation[0]);
++		y = lsm6dsv16x_sflp_half_to_float((uint16_t)data->sflp_game_rotation[1]);
++		z = lsm6dsv16x_sflp_half_to_float((uint16_t)data->sflp_game_rotation[2]);
++
++		float sumsq = x * x + y * y + z * z;
++
++		if (sumsq > 1.0f) {
++			float norm = sqrtf(sumsq);
++
++			x /= norm;
++			y /= norm;
++			z /= norm;
++			sumsq = 1.0f;
++		}
++
++		w = sqrtf(1.0f - sumsq);
++	}
++
++	sensor_value_from_float(&val[0], x);
++	sensor_value_from_float(&val[1], y);
++	sensor_value_from_float(&val[2], z);
++	sensor_value_from_float(&val[3], w);
++
++	return 0;
++}
++
++static int lsm6dsv16x_sflp_gyro_bias_channel_get(struct sensor_value *val,
++						 struct lsm6dsv16x_data *data)
++{
++	if (!data->sflp_gyro_bias_valid) {
++		return -ENODATA;
++	}
++
++	for (uint8_t i = 0; i < 3; i++) {
++		lsm6dsv16x_gyro_convert(val++, data->sflp_gyro_bias[i], GAIN_UNIT_G);
++	}
++
++	return 0;
++}
++
++static int lsm6dsv16x_timestamp_channel_get(struct sensor_value *val, struct lsm6dsv16x_data *data)
++{
++	if (!data->timestamp_valid) {
++		return -ENODATA;
++	}
++
++	/*
++	 * Private driver channel: raw SFLP timestamp in microseconds modulo
++	 * 2^32 before being viewed through signed val1.
++	 */
++	val->val1 = (int32_t)(data->timestamp * LSM6DSV16X_TIMESTAMP_US_PER_TICK);
++	val->val2 = 0;
++
++	return 0;
++}
++
+ #if defined(CONFIG_LSM6DSV16X_ENABLE_TEMP)
+ static void lsm6dsv16x_gyro_channel_get_temp(struct sensor_value *val, struct lsm6dsv16x_data *data)
+ {
+@@ -682,6 +953,16 @@ static int lsm6dsv16x_channel_get(const struct device *dev, enum sensor_channel
+ {
+ 	struct lsm6dsv16x_data *data = dev->data;
+ 
++	if (chan == (enum sensor_channel)LSM6DSV16X_SENSOR_CHAN_SFLP_GAME_ROTATION_VECTOR) {
++		return lsm6dsv16x_sflp_game_rotation_channel_get(val, data);
++	}
++	if (chan == (enum sensor_channel)LSM6DSV16X_SENSOR_CHAN_SFLP_GYRO_BIAS) {
++		return lsm6dsv16x_sflp_gyro_bias_channel_get(val, data);
++	}
++	if (chan == (enum sensor_channel)LSM6DSV16X_SENSOR_CHAN_TIMESTAMP) {
++		return lsm6dsv16x_timestamp_channel_get(val, data);
++	}
++
+ 	switch (chan) {
+ 	case SENSOR_CHAN_ACCEL_X:
+ 	case SENSOR_CHAN_ACCEL_Y:
+@@ -756,6 +1037,52 @@ static const struct sensor_driver_api lsm6dsv16x_driver_api = {
+ 	.channel_get = lsm6dsv16x_channel_get,
+ };
+ 
++static int lsm6dsv16x_init_fifo_sflp(const struct device *dev)
++{
++	const struct lsm6dsv16x_config *cfg = dev->config;
++	stmdev_ctx_t *ctx = (stmdev_ctx_t *)&cfg->ctx;
++	lsm6dsv16x_fifo_sflp_raw_t sflp_batch = {
++		.game_rotation = 1,
++		.gravity = 0,
++		.gbias = 1,
++	};
++
++	if (lsm6dsv16x_fifo_watermark_set(ctx, 3) < 0) {
++		LOG_DBG("failed to set FIFO watermark");
++		return -EIO;
++	}
++	if (lsm6dsv16x_sflp_game_rotation_set(ctx, 1) < 0) {
++		LOG_DBG("failed to enable SFLP game rotation");
++		return -EIO;
++	}
++	if (lsm6dsv16x_sflp_data_rate_set(ctx, LSM6DSV16X_SFLP_240Hz) < 0) {
++		LOG_DBG("failed to set SFLP data rate");
++		return -EIO;
++	}
++	if (lsm6dsv16x_fifo_sflp_batch_set(ctx, sflp_batch) < 0) {
++		LOG_DBG("failed to enable SFLP FIFO batching");
++		return -EIO;
++	}
++	if (lsm6dsv16x_block_data_update_set(ctx, 1) < 0) {
++		LOG_DBG("failed to set BDU mode");
++		return -EIO;
++	}
++	if (lsm6dsv16x_fifo_timestamp_batch_set(ctx, LSM6DSV16X_TMSTMP_DEC_1) < 0) {
++		LOG_DBG("failed to enable FIFO timestamp batching");
++		return -EIO;
++	}
++	if (lsm6dsv16x_timestamp_set(ctx, 1) < 0) {
++		LOG_DBG("failed to enable timestamp counter");
++		return -EIO;
++	}
++	if (lsm6dsv16x_fifo_mode_set(ctx, LSM6DSV16X_STREAM_MODE) < 0) {
++		LOG_DBG("failed to set FIFO stream mode");
++		return -EIO;
++	}
++
++	return 0;
++}
++
+ static int lsm6dsv16x_init_chip(const struct device *dev)
+ {
+ 	const struct lsm6dsv16x_config *cfg = dev->config;
+@@ -825,8 +1152,8 @@ static int lsm6dsv16x_init_chip(const struct device *dev)
+ 		return -EIO;
+ 	}
+ 
+-	if (lsm6dsv16x_block_data_update_set(ctx, 1) < 0) {
+-		LOG_DBG("failed to set BDU mode");
++	if (lsm6dsv16x_init_fifo_sflp(dev) < 0) {
++		LOG_ERR("failed to initialize SFLP FIFO");
+ 		return -EIO;
+ 	}
+ 
+diff --git a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.h b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.h
+index a48a9e00f51..a3a0f811b3e 100644
+--- a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.h
++++ b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.h
+@@ -11,6 +11,7 @@
+ #ifndef ZEPHYR_DRIVERS_SENSOR_LSM6DSV16X_LSM6DSV16X_H_
+ #define ZEPHYR_DRIVERS_SENSOR_LSM6DSV16X_LSM6DSV16X_H_
+ 
++#include <zephyr/drivers/sensor/lsm6dsv16x.h>
+ #include <zephyr/drivers/sensor.h>
+ #include <zephyr/types.h>
+ #include <zephyr/drivers/gpio.h>
+@@ -75,6 +76,12 @@ struct lsm6dsv16x_data {
+ 	uint32_t acc_gain;
+ 	int16_t gyro[3];
+ 	uint32_t gyro_gain;
++	int16_t sflp_game_rotation[3];
++	int16_t sflp_gyro_bias[3];
++	uint32_t timestamp;
++	bool sflp_game_rotation_valid;
++	bool sflp_gyro_bias_valid;
++	bool timestamp_valid;
+ #if defined(CONFIG_LSM6DSV16X_ENABLE_TEMP)
+ 	int16_t temp_sample;
+ #endif
+@@ -108,6 +115,8 @@ struct lsm6dsv16x_data {
+ 	const struct sensor_trigger *trig_drdy_gyr;
+ 	sensor_trigger_handler_t handler_drdy_temp;
+ 	const struct sensor_trigger *trig_drdy_temp;
++	sensor_trigger_handler_t handler_drdy_fifo;
++	const struct sensor_trigger *trig_drdy_fifo;
+ 
+ #if defined(CONFIG_LSM6DSV16X_TRIGGER_OWN_THREAD)
+ 	K_KERNEL_STACK_MEMBER(thread_stack, CONFIG_LSM6DSV16X_THREAD_STACK_SIZE);
+diff --git a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_trigger.c b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_trigger.c
+index 7b706624ff5..ed0d0235ccf 100644
+--- a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_trigger.c
++++ b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_trigger.c
+@@ -111,6 +111,54 @@ static int lsm6dsv16x_enable_g_int(const struct device *dev, int enable)
+ 	return ret;
+ }
+ 
++/**
++ * lsm6dsv16x_enable_fifo_int - enable selected int pin to generate FIFO watermark interrupt
++ */
++static int lsm6dsv16x_enable_fifo_int(const struct device *dev, int enable)
++{
++	const struct lsm6dsv16x_config *cfg = dev->config;
++	stmdev_ctx_t *ctx = (stmdev_ctx_t *)&cfg->ctx;
++	lsm6dsv16x_pin_int_route_t val;
++	int ret;
++
++	if (cfg->drdy_pin == 1) {
++		ret = lsm6dsv16x_pin_int1_route_get(ctx, &val);
++		if (ret < 0) {
++			LOG_ERR("pin_int1_route_get error");
++			return ret;
++		}
++
++		val.fifo_th = enable ? 1 : 0;
++
++		ret = lsm6dsv16x_pin_int1_route_set(ctx, &val);
++	} else {
++		ret = lsm6dsv16x_pin_int2_route_get(ctx, &val);
++		if (ret < 0) {
++			LOG_ERR("pin_int2_route_get error");
++			return ret;
++		}
++
++		val.fifo_th = enable ? 1 : 0;
++
++		ret = lsm6dsv16x_pin_int2_route_set(ctx, &val);
++	}
++
++	if (ret < 0) {
++		return ret;
++	}
++
++	if (enable) {
++		ret = lsm6dsv16x_interrupt_enable_set(
++			ctx, (lsm6dsv16x_interrupt_mode_t){.enable = 1, .lir = 0});
++		if (ret < 0) {
++			LOG_ERR("interrupt_enable_set error");
++			return ret;
++		}
++	}
++
++	return 0;
++}
++
+ /**
+  * lsm6dsv16x_trigger_set - link external trigger to event data ready
+  */
+@@ -141,6 +189,15 @@ int lsm6dsv16x_trigger_set(const struct device *dev, const struct sensor_trigger
+ 		} else {
+ 			return lsm6dsv16x_enable_g_int(dev, LSM6DSV16X_DIS_BIT);
+ 		}
++	} else if ((trig->type == SENSOR_TRIG_FIFO_WATERMARK) &&
++		   (trig->chan == (enum sensor_channel)LSM6DSV16X_SENSOR_CHAN_FIFO)) {
++		lsm6dsv16x->handler_drdy_fifo = handler;
++		lsm6dsv16x->trig_drdy_fifo = trig;
++		if (handler) {
++			return lsm6dsv16x_enable_fifo_int(dev, LSM6DSV16X_EN_BIT);
++		} else {
++			return lsm6dsv16x_enable_fifo_int(dev, LSM6DSV16X_DIS_BIT);
++		}
+ 	}
+ 
+ 	return -ENOTSUP;
+@@ -156,24 +213,45 @@ static void lsm6dsv16x_handle_interrupt(const struct device *dev)
+ 	const struct lsm6dsv16x_config *cfg = dev->config;
+ 	stmdev_ctx_t *ctx = (stmdev_ctx_t *)&cfg->ctx;
+ 	lsm6dsv16x_data_ready_t status;
++	lsm6dsv16x_fifo_status_t fifo_status;
+ 
+ 	while (1) {
++		bool fifo_pending = false;
++
+ 		if (lsm6dsv16x_flag_data_ready_get(ctx, &status) < 0) {
+ 			LOG_DBG("failed reading status reg");
+ 			return;
+ 		}
+ 
+-		if ((status.drdy_xl == 0) && (status.drdy_gy == 0)) {
++		if (lsm6dsv16x->handler_drdy_fifo != NULL) {
++			if (lsm6dsv16x_fifo_status_get(ctx, &fifo_status) < 0) {
++				LOG_DBG("failed reading FIFO status reg");
++				return;
++			}
++
++			/*
++			 * Drain queued FIFO samples once the interrupt thread is
++			 * awake, even if the watermark condition has already
++			 * cleared by the time status is read.
++			 */
++			fifo_pending = (fifo_status.fifo_th != 0) || (fifo_status.fifo_level != 0);
++		}
++
++		if ((status.drdy_xl == 0) && (status.drdy_gy == 0) && !fifo_pending) {
+ 			break;
+ 		}
+ 
+-		if ((status.drdy_xl) && (lsm6dsv16x->handler_drdy_acc != NULL)) {
++		if ((status.drdy_xl != 0) && lsm6dsv16x->handler_drdy_acc != NULL) {
+ 			lsm6dsv16x->handler_drdy_acc(dev, lsm6dsv16x->trig_drdy_acc);
+ 		}
+ 
+-		if ((status.drdy_gy) && (lsm6dsv16x->handler_drdy_gyr != NULL)) {
++		if ((status.drdy_gy != 0) && lsm6dsv16x->handler_drdy_gyr != NULL) {
+ 			lsm6dsv16x->handler_drdy_gyr(dev, lsm6dsv16x->trig_drdy_gyr);
+ 		}
++
++		if (fifo_pending) {
++			lsm6dsv16x->handler_drdy_fifo(dev, lsm6dsv16x->trig_drdy_fifo);
++		}
+ 	}
+ 
+ 	gpio_pin_interrupt_configure_dt(lsm6dsv16x->drdy_gpio, GPIO_INT_EDGE_TO_ACTIVE);
+@@ -240,7 +318,8 @@ int lsm6dsv16x_init_interrupt(const struct device *dev)
+ 
+ 	k_thread_create(&lsm6dsv16x->thread, lsm6dsv16x->thread_stack,
+ 			CONFIG_LSM6DSV16X_THREAD_STACK_SIZE, lsm6dsv16x_thread, lsm6dsv16x, NULL,
+-			NULL, K_PRIO_COOP(CONFIG_LSM6DSV16X_THREAD_PRIORITY), 0, K_NO_WAIT);
++			NULL, K_PRIO_PREEMPT(CONFIG_LSM6DSV16X_THREAD_PRIORITY), K_FP_REGS,
++			K_NO_WAIT);
+ 	k_thread_name_set(&lsm6dsv16x->thread, "lsm6dsv16x");
+ #elif defined(CONFIG_LSM6DSV16X_TRIGGER_GLOBAL_THREAD)
+ 	lsm6dsv16x->work.handler = lsm6dsv16x_work_cb;
+diff --git a/include/zephyr/drivers/sensor/lsm6dsv16x.h b/include/zephyr/drivers/sensor/lsm6dsv16x.h
+new file mode 100644
+index 00000000000..e8aea61fb8d
+--- /dev/null
++++ b/include/zephyr/drivers/sensor/lsm6dsv16x.h
+@@ -0,0 +1,21 @@
++#ifndef ZEPHYR_INCLUDE_DRIVERS_SENSOR_LSM6DSV16X_H_
++#define ZEPHYR_INCLUDE_DRIVERS_SENSOR_LSM6DSV16X_H_
++
++#include <zephyr/drivers/sensor.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++enum lsm6dsv16x_sensor_channel {
++	LSM6DSV16X_SENSOR_CHAN_SFLP_GAME_ROTATION_VECTOR = SENSOR_CHAN_PRIV_START,
++	LSM6DSV16X_SENSOR_CHAN_SFLP_GYRO_BIAS,
++	LSM6DSV16X_SENSOR_CHAN_TIMESTAMP,
++	LSM6DSV16X_SENSOR_CHAN_FIFO,
++};
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* ZEPHYR_INCLUDE_DRIVERS_SENSOR_LSM6DSV16X_H_ */
