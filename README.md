@@ -4,7 +4,7 @@
 
 This is a work-in-progress firmware reimplementation project for the 2026 Steam Controller, internally referred to as Ibex/Triton.
 
-It is not production firmware yet, and it is not an end-user mod package. But it is already good enough to play some games, despite missing gyro, haptics, and polished touchpad behavior. For example, I beat *Bowser in the Sky* with this firmware.
+It is not production firmware yet, and it is not an end-user mod package. But it is already good enough to play some games, despite missing haptics and polished touchpad behavior. For example, I beat *Bowser in the Sky* with this firmware.
 
 This project is unofficial and is not affiliated with, endorsed by, or supported by Valve Corporation.
 This repository does not contain Valve firmware images.
@@ -15,6 +15,7 @@ Currently working at least partially:
 
 - direct GPIO and GreenPAK-backed buttons
 - analog sticks and triggers
+- LSM6DSV16X accelerometer/gyro/quaternion IMU reports
 - Olympus touchpad: basic support
 - RGBW LED
 - USB HID
@@ -26,7 +27,7 @@ Currently working at least partially:
 - Ibex settings registry (mostly only storage)
 - Valve bootloader-compatible packaging and flashing
 
-The most glaring omissions are gyro, haptics, battery/charger handling, and grip sense.
+The most glaring omissions are haptics and polished touchpad behavior.
 
 ### TODO
 
@@ -37,7 +38,7 @@ The most glaring omissions are gyro, haptics, battery/charger handling, and grip
   - [ ] Trigger neutral deadzone seems too large
 - [x] Buttons
   - [x] GreenPAK buttons
-  - [ ] Grip sense
+  - [x] Grip sense
 - [ ] Power
   - [x] Power-button long-hold system-off path
   - [x] Sleep mode
@@ -49,7 +50,7 @@ The most glaring omissions are gyro, haptics, battery/charger handling, and grip
   - [x] RGBW LED
   - [ ] IR LED
 - [x] Ibex settings registry
-  - [ ] Actually use the settings in the firmware
+  - [ ] Expand firmware consumers beyond IMU paths
 - [x] ESB
   - [x] ESB bonding over BLE
   - [x] ESB bonding over USB
