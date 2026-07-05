@@ -37,13 +37,16 @@ enum valve_feature_opcode
 	VALVE_FEATURE_GET_DEVICE_INFO = ID_GET_DEVICE_INFO,                           /* 0xA1 */
 	VALVE_FEATURE_WRITE_CALIBRATION_DATA = 0xA2,                                  /* 0xA2 */
 	VALVE_FEATURE_GET_STRING_ATTRIBUTE = ID_GET_STRING_ATTRIBUTE,                 /* 0xAE */
+	VALVE_FEATURE_CALIBRATE_GYRO = ID_CALIBRATE_GYRO,                             /* 0xB5 */
 	VALVE_FEATURE_GET_CHIPID = ID_GET_CHIPID,                                     /* 0xBA */
 	VALVE_FEATURE_GET_BATTERY_DATA = 0xBE,                                        /* 0xBE */
 	VALVE_FEATURE_CALIBRATE_ANALOG_TRIGGERS = ID_CALIBRATE_ANALOG_TRIGGERS,       /* 0xC0 */
 	VALVE_FEATURE_SET_AUDIO_MAPPING = ID_SET_AUDIO_MAPPING,                       /* 0xC1 */
+	VALVE_FEATURE_CHECK_GYRO_FW_LOAD = ID_CHECK_GYRO_FW_LOAD,                     /* 0xC2 */
 	/* SDL name is generic but the stock handler calibrates pressure sensors */   /**/
 	VALVE_FEATURE_CALIBRATE_PRESSURE_SENSORS = ID_CALIBRATE_ANALOG,               /* 0xC3 */
 	VALVE_FEATURE_SET_LED_COLOR = 0xC5,                                           /* 0xC5 */
+	VALVE_FEATURE_RESET_IMU = ID_RESET_IMU,                                       /* 0xCE */
 	VALVE_FEATURE_CALIBRATE_TRACKPAD_STICK = 0xD8,                                /* 0xD8 */
 	VALVE_FEATURE_GET_USER_STORE = 0xDB,                                          /* 0xDB */
 	VALVE_FEATURE_SET_USER_STORE = 0xDC,                                          /* 0xDC */

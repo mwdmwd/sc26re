@@ -5,7 +5,6 @@
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/gpio.h>
-#include <zephyr/drivers/sensor.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
@@ -13,6 +12,7 @@
 #include "analog.h"
 #include "controller.h"
 #include "haptics.h"
+#include "imu.h"
 #include "olympus.h"
 #include "rgbw_led.h"
 
@@ -94,10 +94,7 @@ static const struct hardware_button buttons[] = {
 };
 static struct gpio_callback button_callbacks[ARRAY_SIZE(buttons)];
 K_SEM_DEFINE(input_changed, 0, 1);
-
-#if CONFIG_IBEX_ACCELEROMETER && DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(accel0))
-static const struct device *const accelerometer = DEVICE_DT_GET(DT_ALIAS(accel0));
-#endif
+static uint8_t imu_scan_error_logs;
 
 static void button_changed(const struct device *port, struct gpio_callback *callback,
                            gpio_port_pins_t pins)
@@ -106,14 +103,6 @@ static void button_changed(const struct device *port, struct gpio_callback *call
 	ARG_UNUSED(callback);
 	ARG_UNUSED(pins);
 	hardware_signal_input_changed();
-}
-
-static int axis_to_report(const struct sensor_value *value)
-{
-	int64_t micro_ms2 = sensor_value_to_micro(value);
-	int64_t scaled = micro_ms2 * 16384 / SENSOR_G;
-
-	return CLAMP(scaled, INT16_MIN, INT16_MAX);
 }
 
 uint32_t hardware_read_buttons(void)
@@ -163,12 +152,11 @@ int hardware_init(void)
 		}
 	}
 
-#if CONFIG_IBEX_ACCELEROMETER && DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(accel0))
-	if(!device_is_ready(accelerometer))
+	err = imu_init();
+	if(err)
 	{
-		LOG_WRN("accelerometer is not ready; reports will contain zeroes");
+		LOG_WRN("IMU unavailable: %d", err);
 	}
-#endif
 
 #if CONFIG_IBEX_ANALOG_INPUTS
 	err = analog_init();
@@ -209,19 +197,12 @@ void hardware_read_report(struct controller_report *report)
 
 	report->buttons = hardware_read_buttons();
 
-#if CONFIG_IBEX_ACCELEROMETER && DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(accel0))
-	if(device_is_ready(accelerometer) && sensor_sample_fetch(accelerometer) == 0)
+	int err = imu_read_report(report);
+	if(err && imu_scan_error_logs < 8)
 	{
-		struct sensor_value xyz[3];
-
-		if(sensor_channel_get(accelerometer, SENSOR_CHAN_ACCEL_XYZ, xyz) == 0)
-		{
-			report->accel_x = axis_to_report(&xyz[0]);
-			report->accel_y = axis_to_report(&xyz[1]);
-			report->accel_z = axis_to_report(&xyz[2]);
-		}
+		imu_scan_error_logs++;
+		LOG_WRN("IMU scan failed: %d", err);
 	}
-#endif
 
 #if CONFIG_IBEX_ANALOG_INPUTS
 	if(analog_read_report(report) != 0)

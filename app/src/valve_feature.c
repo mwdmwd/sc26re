@@ -10,6 +10,7 @@
 
 #include "controller.h"
 #include "ibex_settings_registry.h"
+#include "imu.h"
 #include "power.h"
 #include "valve_feature.h"
 #include "valve_identity.h"
@@ -17,7 +18,7 @@
 
 LOG_MODULE_REGISTER(valve_feature);
 
-#define VALVE_SETTINGS_PATH_MAX 24
+#define VALVE_SETTINGS_PATH_MAX 48
 #define VALVE_PROTOCOL_BUILD_TIMESTAMP 0x6a3bfe74
 #define VALVE_PROTOCOL_BUILD_SHA "a371f66dd017"
 #define VALVE_BLE_CAPABILITIES 0x68d2f92e
@@ -157,12 +158,15 @@ static const char *feature_opcode_name(uint8_t opcode)
 		NAME(GET_DEVICE_INFO)
 		NAME(WRITE_CALIBRATION_DATA)
 		NAME(GET_STRING_ATTRIBUTE)
+		NAME(CALIBRATE_GYRO)
 		NAME(GET_CHIPID)
 		NAME(GET_BATTERY_DATA)
 		NAME(CALIBRATE_ANALOG_TRIGGERS)
 		NAME(SET_AUDIO_MAPPING)
+		NAME(CHECK_GYRO_FW_LOAD)
 		NAME(CALIBRATE_PRESSURE_SENSORS)
 		NAME(SET_LED_COLOR)
+		NAME(RESET_IMU)
 		NAME(CALIBRATE_TRACKPAD_STICK)
 		NAME(GET_USER_STORE)
 		NAME(SET_USER_STORE)
@@ -454,6 +458,12 @@ static ssize_t build_feature_response(enum valve_feature_link link, const uint8_
 		case VALVE_FEATURE_GET_CHIPID:
 			prepare_chip_id(&cursor, end);
 			break;
+		case VALVE_FEATURE_CHECK_GYRO_FW_LOAD:
+			if(cursor < end)
+			{
+				*cursor++ = imu_ready() ? 1 : 0;
+			}
+			break;
 		case VALVE_FEATURE_READ_SETTING:
 			if(request_path(request, len, path, sizeof(path), &value_offset))
 			{
@@ -497,6 +507,8 @@ static ssize_t build_feature_response(enum valve_feature_link link, const uint8_
 		case VALVE_FEATURE_TURN_OFF_CONTROLLER:
 		case VALVE_FEATURE_STAGE_SETTING:
 		case VALVE_FEATURE_COMMIT_SETTING:
+		case VALVE_FEATURE_CALIBRATE_GYRO:
+		case VALVE_FEATURE_RESET_IMU:
 			break;
 		default:
 			return -ENOTSUP;
@@ -567,6 +579,11 @@ static int handle_feature_request(enum valve_feature_link link, const uint8_t *r
 		case VALVE_FEATURE_SET_DEFAULT_DIGITAL_MAPPINGS:
 			digital_mappings_len = 0;
 			return 0;
+		case VALVE_FEATURE_CALIBRATE_GYRO:
+			return imu_calibrate_gyro();
+		case VALVE_FEATURE_RESET_IMU:
+			imu_reset();
+			return 0;
 		case VALVE_FEATURE_REBOOT_TO_ISP:
 			(void)power_reboot_to_valve_isp();
 			return 0;
@@ -598,6 +615,7 @@ static int handle_feature_request(enum valve_feature_link link, const uint8_t *r
 		case VALVE_FEATURE_GET_DIGITAL_MAPPINGS:
 		case VALVE_FEATURE_GET_DEVICE_INFO:
 		case VALVE_FEATURE_GET_CHIPID:
+		case VALVE_FEATURE_CHECK_GYRO_FW_LOAD:
 		case VALVE_FEATURE_READ_SETTING:
 		case VALVE_FEATURE_GET_SETTINGS_VALUES:
 		case VALVE_FEATURE_GET_SETTINGS_MAXS:

@@ -59,6 +59,14 @@ struct controller_report
 	int16_t accel_x;
 	int16_t accel_y;
 	int16_t accel_z;
+	int16_t gyro_x;
+	int16_t gyro_y;
+	int16_t gyro_z;
+	int16_t gyro_quat_w;
+	int16_t gyro_quat_x;
+	int16_t gyro_quat_y;
+	int16_t gyro_quat_z;
+	uint32_t imu_timestamp_us;
 } __packed;
 
 enum controller_charge_state

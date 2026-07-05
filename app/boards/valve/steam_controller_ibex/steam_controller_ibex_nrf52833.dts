@@ -8,6 +8,7 @@
 #include <zephyr/dt-bindings/adc/nrf-saadc.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 #include <zephyr/dt-bindings/pwm/pwm.h>
+#include <zephyr/dt-bindings/sensor/lsm6dsv16x.h>
 
 / {
 	model = "Steam Controller Ibex";
@@ -294,6 +295,12 @@
 	imu: lsm6dsv16x@6a {
 		compatible = "st,lsm6dsv16x";
 		reg = <0x6a>;
+		accel-range = <LSM6DSV16X_DT_FS_2G>;
+		accel-odr = <LSM6DSV16X_DT_ODR_HA01_AT_250Hz>;
+		gyro-range = <LSM6DSV16X_DT_FS_2000DPS>;
+		gyro-odr = <LSM6DSV16X_DT_ODR_HA01_AT_250Hz>;
+		int1-gpios = <&gpio0 7 GPIO_ACTIVE_HIGH>;
+		drdy-pin = <1>;
 		status = "okay";
 	};
 

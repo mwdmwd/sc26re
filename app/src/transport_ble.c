@@ -723,9 +723,9 @@ int transport_ble_send(const struct controller_report *report)
 	 *   bytes 5-16: little-endian trigger and stick axes
 	 *   bytes 17-28: little-endian touchpad axes and pressures
 	 *   bytes 29-32: little-endian IMU timestamp in microseconds
-	 *   bytes 33-38: little-endian signed accelerometer XYZ, 16384 units/g
-	 *
-	 * Keep gyro and quaternion fields neutral until those sensors are implemented.
+	 *   bytes 33-38: little-endian signed accelerometer XYZ, 61 ug/LSB
+	 *   bytes 39-44: little-endian signed gyro XYZ, 16.384 units/degree/s
+	 *   report 0x42 only: bytes 45-52 quaternion WXYZ, Q15
 	 */
 	if(ble_state_input_notify_enabled)
 	{

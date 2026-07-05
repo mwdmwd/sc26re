@@ -9,6 +9,7 @@
 #include <zephyr/sys/byteorder.h>
 
 #include "calibration.h"
+#include "imu.h"
 #include "valve_settings.h"
 
 LOG_MODULE_REGISTER(valve_settings);
@@ -166,6 +167,11 @@ bool valve_settings_read(const char *path, uint8_t *buf, size_t capacity, size_t
 		return calibration_read_trigger(side, buf, capacity, len);
 	}
 
+	if(imu_settings_read(path, buf, capacity, len))
+	{
+		return true;
+	}
+
 	return false;
 }
 
@@ -237,6 +243,12 @@ int valve_settings_stage(const char *path, const uint8_t *value, size_t len)
 		return calibration_stage_trigger(side, value, len);
 	}
 
+	err = imu_settings_stage(path, value, len);
+	if(err != -ENOENT)
+	{
+		return err;
+	}
+
 	return -ENOENT;
 }
 
@@ -303,6 +315,12 @@ int valve_settings_commit(const char *path)
 	if(calibration_path_side(path, &side))
 	{
 		return calibration_commit_trigger(side);
+	}
+
+	err = imu_settings_commit(path);
+	if(err != -ENOENT)
+	{
+		return err;
 	}
 
 	return -ENOENT;

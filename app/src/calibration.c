@@ -175,6 +175,11 @@ static int cal_settings_set(const char *name, size_t len, settings_read_cb read_
 		           ? load_stick_setting(CALIBRATION_RIGHT, read_cb, cb_arg)
 		           : -EINVAL;
 	}
+	if(strcmp(name, "sensors/gyroscope/bias") == 0)
+	{
+		/* Loaded explicitly by the IMU module. */
+		return 0;
+	}
 
 	return -ENOENT;
 }
