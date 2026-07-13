@@ -166,6 +166,12 @@ int hardware_init(void)
 	}
 #endif
 
+	err = haptics_init();
+	if(err)
+	{
+		LOG_WRN("haptics unavailable: %d", err);
+	}
+
 #if CONFIG_IBEX_OLYMPUS
 	err = olympus_init();
 	if(err)
@@ -173,12 +179,6 @@ int hardware_init(void)
 		LOG_WRN("Olympus touchpads unavailable: %d", err);
 	}
 #endif
-
-	err = haptics_init();
-	if(err)
-	{
-		LOG_WRN("haptics unavailable: %d", err);
-	}
 
 #if CONFIG_IBEX_RGBW_LED
 	err = rgbw_led_init();

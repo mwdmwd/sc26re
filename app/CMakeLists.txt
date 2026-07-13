@@ -28,6 +28,30 @@ target_sources(app PRIVATE
 )
 
 target_sources_ifdef(CONFIG_HAPTICS_PWM_NRF app PRIVATE src/haptics_pwm_nrf.c)
+if(CONFIG_IBEX_HAPTICS_PWM)
+	set(IBEX_HAPTICS_WAVEFORMS_H ${PROJECT_BINARY_DIR}/generated/haptics_waveforms.h)
+
+	add_custom_command(
+		OUTPUT ${IBEX_HAPTICS_WAVEFORMS_H}
+		COMMAND ${PYTHON_EXECUTABLE}
+			${CMAKE_CURRENT_SOURCE_DIR}/../scripts/haptics-wav-to-header.py
+			--output ${IBEX_HAPTICS_WAVEFORMS_H}
+			--input haptics_waveform_tick=${CMAKE_CURRENT_SOURCE_DIR}/assets/haptics/tick.wav
+			--input haptics_waveform_click=${CMAKE_CURRENT_SOURCE_DIR}/assets/haptics/click.wav
+			--input haptics_waveform_scream=${CMAKE_CURRENT_SOURCE_DIR}/assets/haptics/scream.wav
+		DEPENDS
+			${CMAKE_CURRENT_SOURCE_DIR}/../scripts/haptics-wav-to-header.py
+			${CMAKE_CURRENT_SOURCE_DIR}/assets/haptics/tick.wav
+			${CMAKE_CURRENT_SOURCE_DIR}/assets/haptics/click.wav
+			${CMAKE_CURRENT_SOURCE_DIR}/assets/haptics/scream.wav
+		COMMENT "Generating Ibex haptics waveform header"
+		VERBATIM
+	)
+	add_custom_target(ibex_haptics_waveforms DEPENDS ${IBEX_HAPTICS_WAVEFORMS_H})
+	add_dependencies(app ibex_haptics_waveforms)
+	target_include_directories(app PRIVATE ${PROJECT_BINARY_DIR}/generated)
+	target_sources(app PRIVATE src/haptics_pwm_ibex.c)
+endif()
 target_sources_ifdef(CONFIG_IBEX_ANALOG_INPUTS app PRIVATE src/analog.c)
 target_sources_ifdef(CONFIG_IBEX_OLYMPUS app PRIVATE src/olympus.c)
 target_sources_ifdef(CONFIG_IBEX_BLE app PRIVATE src/transport_ble.c)

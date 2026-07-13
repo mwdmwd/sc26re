@@ -170,6 +170,18 @@
 				   "trigger-left", "trigger-right";
 	};
 
+	ibex_haptics: ibex_haptics {
+		compatible = "valve,ibex-haptics";
+		enable-gpios = <&gpio0 9 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
+		secondary-enable-gpios = <&gpio1 5 GPIO_ACTIVE_HIGH>;
+		/* OFW touchpad haptics: left0 is PWM0 OUT2, right0 is PWM0 OUT0. */
+		left-gpios = <&gpio0 8 GPIO_ACTIVE_HIGH>;
+		right-gpios = <&gpio0 27 GPIO_ACTIVE_HIGH>;
+		left-channel = <2>;
+		right-channel = <0>;
+		status = "okay";
+	};
+
 	pwmrgbleds: pwmrgbleds {
 		compatible = "pwm-leds";
 
@@ -263,6 +275,13 @@
 
 &gpiote {
 	status = "okay";
+};
+
+&i2s0 {
+	status = "okay";
+	pinctrl-0 = <&i2s0_default>;
+	pinctrl-1 = <&i2s0_sleep>;
+	pinctrl-names = "default", "sleep";
 };
 
 &gpio0 {

@@ -147,6 +147,18 @@ config HAPTICS_PWM_NRF
 	help
 	  Short debug beep on button press through the micro:bit piezo.
 
+config IBEX_HAPTICS_PWM
+	bool "Ibex haptics PWM/I2S backend"
+	default y
+	depends on BOARD_STEAM_CONTROLLER_IBEX && GPIO && DT_HAS_VALVE_IBEX_HAPTICS_ENABLED
+	select FPU
+	select FPU_SHARING
+	select NRFX_PWM0
+	select I2S
+	help
+	  Haptics backend for the genuine Ibex touchpad actuators and the
+	  secondary Gri-v3 I2S actuator path.
+
 config IBEX_RGBW_LED
 	bool "RGBW LED control"
 	default y if BOARD_STEAM_CONTROLLER_IBEX

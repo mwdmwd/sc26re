@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+description: Valve Ibex touchpad haptic actuator outputs
+
+compatible: "valve,ibex-haptics"
+
+include: base.yaml
+
+properties:
+  enable-gpios:
+    type: phandle-array
+    required: true
+    description: Active-high touchpad/PWM haptics sequencer enable.
+
+  secondary-enable-gpios:
+    type: phandle-array
+    description: Active-high GRI v3/I2S haptics sequencer enable.
+
+  left-gpios:
+    type: phandle-array
+    required: true
+    description: GPIO pin used as the left actuator PWM output.
+
+  right-gpios:
+    type: phandle-array
+    required: true
+    description: GPIO pin used as the right actuator PWM output.
+
+  left-channel:
+    type: int
+    required: true
+    description: PWM output channel used for the left actuator.
+
+  right-channel:
+    type: int
+    required: true
+    description: PWM output channel used for the right actuator.
