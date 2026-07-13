@@ -11,6 +11,7 @@
 #include "battery.h"
 #include "controller.h"
 #include "esb_backend.h"
+#include "haptics.h"
 #include "ibex_settings_registry.h"
 #include "olympus.h"
 #include "power.h"
@@ -410,6 +411,143 @@ static int cmd_settings_defaults(const struct shell *shell, size_t argc, char **
 	return 0;
 }
 
+static int parse_haptics_channels(const struct shell *shell, size_t argc, char **argv,
+                                  uint8_t *channels)
+{
+	uint32_t mask;
+	int err = 0;
+
+	*channels = HAPTICS_CHANNELS_PRIMARY;
+	if(argc <= 1)
+	{
+		return 0;
+	}
+
+	if(strcmp(argv[1], "left") == 0 || strcmp(argv[1], "left0") == 0)
+	{
+		*channels = HAPTICS_CHANNEL_LEFT_0;
+		return 0;
+	}
+	if(strcmp(argv[1], "right") == 0 || strcmp(argv[1], "right0") == 0)
+	{
+		*channels = HAPTICS_CHANNEL_RIGHT_0;
+		return 0;
+	}
+	if(strcmp(argv[1], "left1") == 0)
+	{
+		*channels = HAPTICS_CHANNEL_LEFT_1;
+		return 0;
+	}
+	if(strcmp(argv[1], "right1") == 0)
+	{
+		*channels = HAPTICS_CHANNEL_RIGHT_1;
+		return 0;
+	}
+	if(strcmp(argv[1], "primary") == 0)
+	{
+		*channels = HAPTICS_CHANNELS_PRIMARY;
+		return 0;
+	}
+	if(strcmp(argv[1], "secondary") == 0)
+	{
+		*channels = HAPTICS_CHANNEL_LEFT_1 | HAPTICS_CHANNEL_RIGHT_1;
+		return 0;
+	}
+	if(strcmp(argv[1], "all") == 0)
+	{
+		*channels = HAPTICS_CHANNELS_ALL;
+		return 0;
+	}
+
+	mask = shell_strtoul(argv[1], 0, &err);
+	if(err || mask > UINT8_MAX)
+	{
+		shell_error(shell,
+		            "channel must be left/right/left1/right1/primary/secondary/all or u8 mask");
+		return -EINVAL;
+	}
+	*channels = (uint8_t)mask;
+	return 0;
+}
+
+static int cmd_haptics_status(const struct shell *shell, size_t argc, char **argv)
+{
+	struct haptics_debug debug;
+	struct haptics_backend_debug backend;
+	int backend_err;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	haptics_get_debug(&debug);
+	backend_err = haptics_backend_get_debug(&backend);
+	shell_print(shell, "ready=%u enabled=%u reports=%u last_report=0x%02x", debug.ready,
+	            debug.enabled, debug.reports_seen, debug.last_report_id);
+	shell_print(shell,
+	            "effects submitted=%u disabled=%u no_channel=%u queue_busy=%u "
+	            "last_effect=%u channels=0x%02x submit_err=%d",
+	            debug.effects_submitted, debug.effects_disabled, debug.effects_no_channel,
+	            debug.effects_queue_busy, debug.last_effect_type, debug.last_effect_channels,
+	            debug.last_submit_err);
+	shell_print(shell, "backend calls=%u errors=%u last_err=%d", debug.backend_calls,
+	            debug.backend_errors, debug.last_backend_err);
+	if(backend_err == 0)
+	{
+		shell_print(shell,
+		            "play requests=%u started=%u suppressed=%u requested=0x%02x "
+		            "physical=0x%02x played=0x%02x samples=%u err=%d",
+		            backend.play_requests, backend.play_started, backend.play_suppressed,
+		            backend.last_requested_channels, backend.last_physical_channels,
+		            backend.last_play_channels, backend.last_sample_count, backend.last_play_err);
+	}
+	return 0;
+}
+
+static int cmd_haptics_tick(const struct shell *shell, size_t argc, char **argv)
+{
+	uint8_t channels;
+	int err;
+
+	err = parse_haptics_channels(shell, argc, argv, &channels);
+	if(err)
+	{
+		return err;
+	}
+	err = haptics_debug_play_tick(channels);
+	shell_print(shell, "tick channels=0x%02x err=%d", channels, err);
+	return err;
+}
+
+static int cmd_haptics_click(const struct shell *shell, size_t argc, char **argv)
+{
+	uint8_t channels;
+	int err;
+
+	err = parse_haptics_channels(shell, argc, argv, &channels);
+	if(err)
+	{
+		return err;
+	}
+	err = haptics_debug_play_click(channels);
+	shell_print(shell, "click channels=0x%02x err=%d", channels, err);
+	return err;
+}
+
+static int cmd_haptics_pulse(const struct shell *shell, size_t argc, char **argv)
+{
+	uint8_t channels;
+	int err;
+
+	err = parse_haptics_channels(shell, argc, argv, &channels);
+	if(err)
+	{
+		return err;
+	}
+	err = haptics_debug_play_pulse(channels);
+	shell_print(shell, "pulse channels=0x%02x err=%d", channels, err);
+	return err;
+}
+
 #if CONFIG_IBEX_OLYMPUS
 static void print_olympus_pad_debug(const struct shell *shell, const char *name,
                                     const struct olympus_pad_debug *pad)
@@ -547,6 +685,13 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
     SHELL_CMD(defaults, NULL, "Reset Ibex runtime settings to defaults", cmd_settings_defaults),
     SHELL_SUBCMD_SET_END);
 
+SHELL_STATIC_SUBCMD_SET_CREATE(
+    sub_haptics, SHELL_CMD(status, NULL, "Show haptics debug counters", cmd_haptics_status),
+    SHELL_CMD_ARG(tick, NULL, "Play tick [channel]", cmd_haptics_tick, 1, 1),
+    SHELL_CMD_ARG(click, NULL, "Play click [channel]", cmd_haptics_click, 1, 1),
+    SHELL_CMD_ARG(pulse, NULL, "Play pulse [channel]", cmd_haptics_pulse, 1, 1),
+    SHELL_SUBCMD_SET_END);
+
 #if CONFIG_IBEX_OLYMPUS
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_olympus,
                                SHELL_CMD(status, NULL, "Show last Olympus raw decode snapshot",
@@ -556,6 +701,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_olympus,
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
     sub_steamctl, SHELL_CMD(battery, &sub_battery, "Battery and charger commands", NULL),
+    SHELL_CMD(haptics, &sub_haptics, "Haptics debug commands", NULL),
 #if CONFIG_IBEX_RGBW_LED
     SHELL_CMD(led, &sub_led, "RGBW LED commands", NULL),
 #endif
