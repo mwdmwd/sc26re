@@ -210,7 +210,9 @@ int analog_init(void)
 	if(IS_ENABLED(CONFIG_SETTINGS) && (!calibration_trigger_loaded(CALIBRATION_LEFT) ||
 	                                   !calibration_trigger_loaded(CALIBRATION_RIGHT) ||
 	                                   !calibration_stick_loaded(CALIBRATION_LEFT) ||
-	                                   !calibration_stick_loaded(CALIBRATION_RIGHT)))
+	                                   !calibration_stick_loaded(CALIBRATION_RIGHT) ||
+	                                   !calibration_pressure_loaded(CALIBRATION_LEFT) ||
+	                                   !calibration_pressure_loaded(CALIBRATION_RIGHT)))
 	{
 		(void)calibration_import_valve_storage();
 	}

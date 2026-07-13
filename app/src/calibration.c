@@ -24,13 +24,19 @@ static struct stick_calibration stick_left = {
 static struct stick_calibration stick_right = {
 	.type = 129,
 };
+static struct pressure_calibration pressure_left;
+static struct pressure_calibration pressure_right;
 
 static bool trigger_left_loaded;
 static bool trigger_right_loaded;
 static bool stick_left_loaded;
 static bool stick_right_loaded;
+static bool pressure_left_loaded;
+static bool pressure_right_loaded;
 static bool trigger_left_dirty;
 static bool trigger_right_dirty;
+static bool pressure_left_dirty;
+static bool pressure_right_dirty;
 
 static struct trigger_calibration *trigger_for_side(enum calibration_side side)
 {
@@ -40,6 +46,11 @@ static struct trigger_calibration *trigger_for_side(enum calibration_side side)
 static struct stick_calibration *stick_for_side(enum calibration_side side)
 {
 	return side == CALIBRATION_RIGHT ? &stick_right : &stick_left;
+}
+
+static struct pressure_calibration *pressure_for_side(enum calibration_side side)
+{
+	return side == CALIBRATION_RIGHT ? &pressure_right : &pressure_left;
 }
 
 bool calibration_trigger_valid(const struct trigger_calibration *cal)
@@ -55,6 +66,13 @@ bool calibration_stick_valid(const struct stick_calibration *cal)
 	       cal->y_min < cal->y_center_min &&
 	       cal->y_center_min <= cal->y_center_max &&
 	       cal->y_center_max < cal->y_max;
+}
+
+bool calibration_pressure_valid(const struct pressure_calibration *cal)
+{
+	return (cal->mode == 1U || cal->mode == 128U) &&
+	       cal->max > cal->min &&
+	       cal->pressure_scale != 0U;
 }
 
 bool calibration_trigger_loaded(enum calibration_side side)
@@ -75,6 +93,16 @@ const struct trigger_calibration *calibration_trigger(enum calibration_side side
 const struct stick_calibration *calibration_stick(enum calibration_side side)
 {
 	return stick_for_side(side);
+}
+
+bool calibration_pressure_loaded(enum calibration_side side)
+{
+	return side == CALIBRATION_RIGHT ? pressure_right_loaded : pressure_left_loaded;
+}
+
+const struct pressure_calibration *calibration_pressure(enum calibration_side side)
+{
+	return pressure_for_side(side);
 }
 
 static int load_trigger_setting(enum calibration_side side, settings_read_cb read_cb, void *cb_arg)
@@ -149,6 +177,47 @@ static int load_stick_setting(enum calibration_side side, settings_read_cb read_
 	return 0;
 }
 
+static int load_pressure_setting(enum calibration_side side, settings_read_cb read_cb, void *cb_arg)
+{
+	struct pressure_calibration loaded;
+	struct pressure_calibration *current = pressure_for_side(side);
+	bool *loaded_flag = side == CALIBRATION_RIGHT ? &pressure_right_loaded : &pressure_left_loaded;
+	ssize_t read_len = read_cb(cb_arg, &loaded, sizeof(loaded));
+
+	if(read_len < 0)
+	{
+		return read_len;
+	}
+	if(read_len != sizeof(loaded))
+	{
+		return -EINVAL;
+	}
+	if(loaded.mode == 0U)
+	{
+		memset(current, 0, sizeof(*current));
+		*loaded_flag = false;
+		LOG_INF("Loaded cleared %s pressure calibration",
+		        side == CALIBRATION_RIGHT ? "right" : "left");
+		return 0;
+	}
+	if(!calibration_pressure_valid(&loaded))
+	{
+		memset(current, 0, sizeof(*current));
+		*loaded_flag = false;
+		LOG_WRN("Ignoring invalid %s pressure calibration: mode=%u min=%d max=%d scale=%u",
+		        side == CALIBRATION_RIGHT ? "right" : "left", loaded.mode, loaded.min, loaded.max,
+		        loaded.pressure_scale);
+		return 0;
+	}
+
+	*current = loaded;
+	*loaded_flag = true;
+	LOG_INF("Loaded %s pressure calibration: mode=%u min=%d max=%d scale=%u",
+	        side == CALIBRATION_RIGHT ? "right" : "left", loaded.mode, loaded.min, loaded.max,
+	        loaded.pressure_scale);
+	return 0;
+}
+
 static int cal_settings_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
 	if(strcmp(name, "trg_l") == 0)
@@ -173,6 +242,18 @@ static int cal_settings_set(const char *name, size_t len, settings_read_cb read_
 	{
 		return len == sizeof(struct stick_calibration)
 		           ? load_stick_setting(CALIBRATION_RIGHT, read_cb, cb_arg)
+		           : -EINVAL;
+	}
+	if(strcmp(name, "prs_l") == 0)
+	{
+		return len == sizeof(struct pressure_calibration)
+		           ? load_pressure_setting(CALIBRATION_LEFT, read_cb, cb_arg)
+		           : -EINVAL;
+	}
+	if(strcmp(name, "prs_r") == 0)
+	{
+		return len == sizeof(struct pressure_calibration)
+		           ? load_pressure_setting(CALIBRATION_RIGHT, read_cb, cb_arg)
 		           : -EINVAL;
 	}
 	if(strcmp(name, "sensors/gyroscope/bias") == 0)
@@ -228,10 +309,14 @@ int calibration_import_valve_storage(void)
 	bool trg_r_found = false;
 	bool joy_l_found = false;
 	bool joy_r_found = false;
+	bool prs_l_found = false;
+	bool prs_r_found = false;
 	struct trigger_calibration ofw_trg_l = { 0 };
 	struct trigger_calibration ofw_trg_r = { 0 };
 	struct stick_calibration ofw_joy_l = { 0 };
 	struct stick_calibration ofw_joy_r = { 0 };
+	struct pressure_calibration ofw_prs_l = { 0 };
+	struct pressure_calibration ofw_prs_r = { 0 };
 
 	err = nvs_mount(&ofw_nvs);
 	if(err)
@@ -272,6 +357,16 @@ int calibration_import_valve_storage(void)
 		{
 			rc = nvs_read(&ofw_nvs, name_id + 0x4000, &ofw_joy_r, sizeof(ofw_joy_r));
 			joy_r_found = rc == sizeof(ofw_joy_r);
+		}
+		else if(strcmp(name, "cal/prs_l") == 0)
+		{
+			rc = nvs_read(&ofw_nvs, name_id + 0x4000, &ofw_prs_l, sizeof(ofw_prs_l));
+			prs_l_found = rc == sizeof(ofw_prs_l);
+		}
+		else if(strcmp(name, "cal/prs_r") == 0)
+		{
+			rc = nvs_read(&ofw_nvs, name_id + 0x4000, &ofw_prs_r, sizeof(ofw_prs_r));
+			prs_r_found = rc == sizeof(ofw_prs_r);
 		}
 	}
 	flash_area_close(fa);
@@ -324,6 +419,28 @@ int calibration_import_valve_storage(void)
 			        ofw_joy_r.x_min, ofw_joy_r.x_center_min, ofw_joy_r.x_center_max,
 			        ofw_joy_r.x_max, ofw_joy_r.y_min, ofw_joy_r.y_center_min,
 			        ofw_joy_r.y_center_max, ofw_joy_r.y_max);
+		}
+	}
+	if(!pressure_left_loaded && prs_l_found && calibration_pressure_valid(&ofw_prs_l))
+	{
+		pressure_left = ofw_prs_l;
+		pressure_left_loaded = true;
+		err = save_setting("cal/prs_l", &ofw_prs_l, sizeof(ofw_prs_l));
+		if(!err)
+		{
+			LOG_INF("Migrated cal/prs_l: mode=%u min=%d max=%d scale=%u", ofw_prs_l.mode,
+			        ofw_prs_l.min, ofw_prs_l.max, ofw_prs_l.pressure_scale);
+		}
+	}
+	if(!pressure_right_loaded && prs_r_found && calibration_pressure_valid(&ofw_prs_r))
+	{
+		pressure_right = ofw_prs_r;
+		pressure_right_loaded = true;
+		err = save_setting("cal/prs_r", &ofw_prs_r, sizeof(ofw_prs_r));
+		if(!err)
+		{
+			LOG_INF("Migrated cal/prs_r: mode=%u min=%d max=%d scale=%u", ofw_prs_r.mode,
+			        ofw_prs_r.min, ofw_prs_r.max, ofw_prs_r.pressure_scale);
 		}
 	}
 
@@ -411,6 +528,97 @@ int calibration_commit_trigger(enum calibration_side side)
 		return 0;
 	}
 
+	err = save_setting(path, value, len);
+	if(err)
+	{
+		LOG_ERR("failed to commit %s: %d", path, err);
+		return err;
+	}
+
+	*dirty = false;
+	LOG_INF("committed %s", path);
+	return 0;
+}
+
+bool calibration_read_pressure(enum calibration_side side, uint8_t *buf, size_t capacity,
+                               size_t *len)
+{
+	const struct pressure_calibration *value = pressure_for_side(side);
+
+	if(!calibration_pressure_loaded(side) || capacity < sizeof(*value))
+	{
+		return false;
+	}
+	memcpy(buf, value, sizeof(*value));
+	*len = sizeof(*value);
+	return true;
+}
+
+int calibration_stage_pressure(enum calibration_side side, const uint8_t *value, size_t len)
+{
+	struct pressure_calibration staged;
+	bool clear;
+
+	if(len != sizeof(staged))
+	{
+		return -EINVAL;
+	}
+	memcpy(&staged, value, sizeof(staged));
+	clear = staged.mode == 0U;
+	if(!clear && !calibration_pressure_valid(&staged))
+	{
+		return -EINVAL;
+	}
+	if(clear)
+	{
+		memset(&staged, 0, sizeof(staged));
+	}
+
+	*pressure_for_side(side) = staged;
+	if(side == CALIBRATION_LEFT)
+	{
+		pressure_left_loaded = !clear;
+		pressure_left_dirty = true;
+	}
+	else
+	{
+		pressure_right_loaded = !clear;
+		pressure_right_dirty = true;
+	}
+
+	LOG_INF("staged %s pressure calibration: mode=%u min=%d max=%d scale=%u",
+	        side == CALIBRATION_RIGHT ? "right" : "left", staged.mode, staged.min, staged.max,
+	        staged.pressure_scale);
+	return 0;
+}
+
+int calibration_commit_pressure(enum calibration_side side)
+{
+	const char *path;
+	const void *value;
+	bool *dirty;
+	size_t len;
+	int err;
+
+	if(side == CALIBRATION_LEFT)
+	{
+		path = "cal/prs_l";
+		value = &pressure_left;
+		dirty = &pressure_left_dirty;
+		len = sizeof(pressure_left);
+	}
+	else
+	{
+		path = "cal/prs_r";
+		value = &pressure_right;
+		dirty = &pressure_right_dirty;
+		len = sizeof(pressure_right);
+	}
+
+	if(!*dirty)
+	{
+		return 0;
+	}
 	err = save_setting(path, value, len);
 	if(err)
 	{

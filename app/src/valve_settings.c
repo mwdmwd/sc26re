@@ -9,6 +9,7 @@
 #include <zephyr/sys/byteorder.h>
 
 #include "calibration.h"
+#include "ibex_settings_registry.h"
 #include "imu.h"
 #include "valve_settings.h"
 
@@ -63,6 +64,36 @@ static bool calibration_path_side(const char *path, enum calibration_side *side)
 	{
 		*side = CALIBRATION_RIGHT;
 		return true;
+	}
+	return false;
+}
+
+static bool pressure_path_side(const char *path, enum calibration_side *side)
+{
+	if(strcmp(path, "cal/prs_l") == 0)
+	{
+		*side = CALIBRATION_LEFT;
+		return true;
+	}
+	if(strcmp(path, "cal/prs_r") == 0)
+	{
+		*side = CALIBRATION_RIGHT;
+		return true;
+	}
+	return false;
+}
+
+static bool ibex_setting_path_id(const char *path, uint8_t *id)
+{
+	for(uint8_t candidate = 0; candidate < IBEX_SETTING_COUNT; ++candidate)
+	{
+		const char *candidate_path = ibex_setting_persist_path(candidate);
+
+		if(candidate_path != NULL && strcmp(path, candidate_path) == 0)
+		{
+			*id = candidate;
+			return true;
+		}
 	}
 	return false;
 }
@@ -145,6 +176,8 @@ static bool nvs_read_path(const char *path, uint8_t *buf, size_t capacity, size_
 bool valve_settings_read(const char *path, uint8_t *buf, size_t capacity, size_t *len)
 {
 	enum calibration_side side;
+	uint8_t setting_id;
+	int16_t setting_value;
 
 	if(strcmp(path, "esb/bond") == 0)
 	{
@@ -162,9 +195,24 @@ bool valve_settings_read(const char *path, uint8_t *buf, size_t capacity, size_t
 		return true;
 	}
 
+	if(ibex_setting_path_id(path, &setting_id))
+	{
+		if(capacity < sizeof(setting_value) || !ibex_setting_get(setting_id, &setting_value))
+		{
+			return false;
+		}
+		sys_put_le16((uint16_t)setting_value, buf);
+		*len = sizeof(setting_value);
+		return true;
+	}
+
 	if(calibration_path_side(path, &side))
 	{
 		return calibration_read_trigger(side, buf, capacity, len);
+	}
+	if(pressure_path_side(path, &side))
+	{
+		return calibration_read_pressure(side, buf, capacity, len);
 	}
 
 	if(imu_settings_read(path, buf, capacity, len))
@@ -217,6 +265,7 @@ static int nvs_write_path(const char *path, const uint8_t *value, size_t len)
 int valve_settings_stage(const char *path, const uint8_t *value, size_t len)
 {
 	enum calibration_side side;
+	uint8_t setting_id;
 	int err;
 
 	if(strcmp(path, "esb/bond") == 0)
@@ -241,6 +290,19 @@ int valve_settings_stage(const char *path, const uint8_t *value, size_t len)
 	if(calibration_path_side(path, &side))
 	{
 		return calibration_stage_trigger(side, value, len);
+	}
+	if(pressure_path_side(path, &side))
+	{
+		return calibration_stage_pressure(side, value, len);
+	}
+
+	if(ibex_setting_path_id(path, &setting_id))
+	{
+		if(len != sizeof(int16_t))
+		{
+			return -EINVAL;
+		}
+		return ibex_setting_set(setting_id, (int16_t)sys_get_le16(value));
 	}
 
 	err = imu_settings_stage(path, value, len);
@@ -286,6 +348,9 @@ static int nvs_commit_path(const char *path)
 int valve_settings_commit(const char *path)
 {
 	enum calibration_side side;
+	uint8_t setting_id;
+	uint8_t encoded[sizeof(int16_t)];
+	int16_t setting_value;
 	int err;
 
 	if(strcmp(path, "esb/bond") == 0)
@@ -315,6 +380,20 @@ int valve_settings_commit(const char *path)
 	if(calibration_path_side(path, &side))
 	{
 		return calibration_commit_trigger(side);
+	}
+	if(pressure_path_side(path, &side))
+	{
+		return calibration_commit_pressure(side);
+	}
+
+	if(ibex_setting_path_id(path, &setting_id))
+	{
+		if(!ibex_setting_get(setting_id, &setting_value))
+		{
+			return -EINVAL;
+		}
+		sys_put_le16((uint16_t)setting_value, encoded);
+		return settings_save_one(path, encoded, sizeof(encoded));
 	}
 
 	err = imu_settings_commit(path);

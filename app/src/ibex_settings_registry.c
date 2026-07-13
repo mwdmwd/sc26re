@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include <zephyr/logging/log.h>
+#include <zephyr/settings/settings.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
@@ -160,9 +161,70 @@ static void notify_changed(uint8_t id, int16_t value)
 	}
 }
 
+static int haptics_settings_set(const char *name, size_t len, settings_read_cb read_cb,
+                                void *cb_arg)
+{
+	uint8_t id;
+	uint8_t encoded[sizeof(int16_t)];
+	int16_t value;
+	ssize_t read_len;
+
+	if(strcmp(name, "enabled") == 0)
+	{
+		id = SETTING_HAPTICS_ENABLED;
+	}
+	else if(strcmp(name, "amplifier_mode") == 0)
+	{
+		id = SETTING_TEST_CONTROL;
+	}
+	else if(strcmp(name, "haptic_master_gain_db") == 0)
+	{
+		id = SETTING_HAPTIC_MASTER_GAIN_DB;
+	}
+	else
+	{
+		return -ENOENT;
+	}
+	if(len != sizeof(value))
+	{
+		return -EINVAL;
+	}
+
+	read_len = read_cb(cb_arg, encoded, sizeof(encoded));
+	if(read_len < 0)
+	{
+		return read_len;
+	}
+	if(read_len != sizeof(value))
+	{
+		return -EINVAL;
+	}
+	value = (int16_t)sys_get_le16(encoded);
+	value = CLAMP(value, setting_entries[id].min_value, setting_entries[id].max_value);
+	if(setting_values[id] != value)
+	{
+		setting_values[id] = value;
+		notify_changed(id, value);
+	}
+	return 0;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(ibex_haptics, "settings/haptics", NULL, haptics_settings_set, NULL,
+                               NULL);
+
 void ibex_settings_registry_init(void)
 {
+	int err;
+
 	ibex_settings_registry_reset_defaults();
+	if(IS_ENABLED(CONFIG_SETTINGS))
+	{
+		err = settings_load_subtree("settings/haptics");
+		if(err)
+		{
+			LOG_WRN("failed to load persistent haptics settings: %d", err);
+		}
+	}
 }
 
 void ibex_settings_registry_reset_defaults(void)

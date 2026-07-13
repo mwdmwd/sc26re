@@ -13,6 +13,8 @@
 #include <zephyr/sys/util.h>
 
 #include "battery.h"
+#include "calibration.h"
+#include "haptics.h"
 #include "ibex_settings_registry.h"
 #include "olympus.h"
 #include "olympus_config.h"
@@ -30,10 +32,12 @@ LOG_MODULE_REGISTER(olympus);
 #define OLYMPUS_THRESHOLD_SCALE_DIVISOR 5
 #define OLYMPUS_CLICK_THRESHOLD 500
 #define OLYMPUS_CLICK_RELEASE_THRESHOLD 400
-#define OLYMPUS_PAD_CLICK_PRESSURE 500
-#define OLYMPUS_PAD_CLICK_PRESSURE_SCALE 10
-#define OLYMPUS_PRESSURE_SCALE 32
 #define OLYMPUS_PRESSURE_MAX INT16_MAX
+#define OLYMPUS_PRESSURE_FILTER_WEIGHT 4
+#define OLYMPUS_PRESSURE_CURVE_TRIM 0.05f
+#define OLYMPUS_PRESSURE_CURVE_SPAN 0.90f
+#define OLYMPUS_PRESSURE_ACTIVE_HYSTERESIS 0.08f
+#define OLYMPUS_PRESSURE_SCALE_REFERENCE 2000.0f
 #define OLYMPUS_GRIP_BASE_THRESHOLD 225
 #define OLYMPUS_GRIP_THRESHOLD_PER_PERCENT 9
 #define OLYMPUS_GRIP_TOUCH_PERCENT 100
@@ -74,6 +78,7 @@ struct olympus_pad_state
 	float filtered_x;
 	float filtered_y;
 	int32_t filtered_touch_pressure;
+	int16_t filtered_pressure;
 };
 
 struct olympus_axis_calibration
@@ -116,14 +121,108 @@ static int32_t scaled_setting_or_default(uint8_t id, int16_t fallback)
 	return MAX(scaled, fallback);
 }
 
-static int32_t pad_click_threshold(bool right)
+static bool pad_pressure_calibration(bool right, float *low, float *high, float *scale)
+{
+	enum calibration_side side = right ? CALIBRATION_RIGHT : CALIBRATION_LEFT;
+
+	if(calibration_pressure_loaded(side))
+	{
+		const struct pressure_calibration *cal = calibration_pressure(side);
+
+		if(cal->mode == 128U)
+		{
+			*low = 0.0f;
+			*high = (float)cal->max - (float)cal->min;
+		}
+		else if(cal->mode == 1U)
+		{
+			*low = cal->min;
+			*high = cal->max;
+		}
+		else
+		{
+			*low = 0.0f;
+			*high = 0.0f;
+			*scale = 0.0f;
+			return false;
+		}
+		*scale = cal->pressure_scale;
+		return *scale != 0.0f;
+	}
+
+	*low = 0.0f;
+	*high = 0.0f;
+	*scale = 0.0f;
+	return false;
+}
+
+static float pad_pressure_normalized(bool right, int16_t filtered_pressure)
+{
+	float low;
+	float high;
+	float scale;
+	float range;
+
+	if(!pad_pressure_calibration(right, &low, &high, &scale))
+	{
+		return 0.0f;
+	}
+	ARG_UNUSED(scale);
+	range = high - low;
+	if(range <= 0.0f)
+	{
+		return 0.0f;
+	}
+	return CLAMP(((float)filtered_pressure - (low + OLYMPUS_PRESSURE_CURVE_TRIM * range)) /
+	                 (OLYMPUS_PRESSURE_CURVE_SPAN * range),
+	             0.0f, 1.0f);
+}
+
+static bool pad_pressure_activation(bool right, float *activation)
 {
 	uint8_t id = right ? IBEX_SETTING_RIGHT_TRACKPAD_CLICK_PRESSURE
 	                   : IBEX_SETTING_LEFT_TRACKPAD_CLICK_PRESSURE;
+	int16_t percent = registry_setting_or_default(id, 40);
 
-	return MAX(MAX((int32_t)registry_setting_or_default(id, OLYMPUS_PAD_CLICK_PRESSURE), 0) *
-	               OLYMPUS_PAD_CLICK_PRESSURE_SCALE,
-	           OLYMPUS_PAD_CLICK_PRESSURE);
+	if(percent < 0)
+	{
+		*activation = 0.0f;
+		return false;
+	}
+
+	*activation = (float)CLAMP(percent, 0, 100) / 100.0f;
+	return true;
+}
+
+static bool pad_pressure_enabled(bool right, float *activation)
+{
+	float low;
+	float high;
+	float scale;
+
+	return pad_pressure_activation(right, activation) &&
+	       pad_pressure_calibration(right, &low, &high, &scale);
+}
+
+static int32_t pad_click_threshold(bool right, bool active)
+{
+	float low;
+	float high;
+	float scale;
+	float activation;
+	float normalized_threshold;
+
+	if(!pad_pressure_activation(right, &activation) ||
+	   !pad_pressure_calibration(right, &low, &high, &scale))
+	{
+		return 0;
+	}
+	normalized_threshold = CLAMP(activation + (active ? -OLYMPUS_PRESSURE_ACTIVE_HYSTERESIS
+	                                                  : OLYMPUS_PRESSURE_ACTIVE_HYSTERESIS),
+	                             0.0f, 1.0f);
+	ARG_UNUSED(scale);
+	return (int32_t)(low + (high - low) * (OLYMPUS_PRESSURE_CURVE_TRIM +
+	                                       OLYMPUS_PRESSURE_CURVE_SPAN * normalized_threshold));
 }
 
 static int32_t grip_touch_threshold(void)
@@ -439,9 +538,21 @@ static int16_t normalized_to_axis(float normalized)
 	return CLAMP((int32_t)((normalized - 0.5f) * 65532.0f), INT16_MIN, INT16_MAX);
 }
 
-static uint16_t scale_pad_pressure(int32_t raw)
+static uint16_t scale_pad_pressure(bool right, float normalized)
 {
-	return CLAMP(raw * OLYMPUS_PRESSURE_SCALE, 0, OLYMPUS_PRESSURE_MAX);
+	float low;
+	float high;
+	float scale;
+
+	if(!pad_pressure_calibration(right, &low, &high, &scale))
+	{
+		return 0;
+	}
+	ARG_UNUSED(low);
+	ARG_UNUSED(high);
+	return CLAMP(
+	    (int32_t)(normalized * (scale / OLYMPUS_PRESSURE_SCALE_REFERENCE) * OLYMPUS_PRESSURE_MAX),
+	    0, OLYMPUS_PRESSURE_MAX);
 }
 
 static void decode_pad(struct olympus_pad_state *state, const int16_t *x_samples,
@@ -453,7 +564,7 @@ static void decode_pad(struct olympus_pad_state *state, const int16_t *x_samples
 	int32_t peak_x;
 	int32_t peak_y;
 	int32_t peak;
-	int32_t pressure_value;
+	int32_t filtered_pressure;
 	int32_t touch_pressure;
 	int32_t click_value;
 	int32_t grip_value;
@@ -463,8 +574,11 @@ static void decode_pad(struct olympus_pad_state *state, const int16_t *x_samples
 	int32_t grip_touch;
 	int32_t grip_release;
 	int32_t pressure_click_threshold;
+	float normalized_pressure;
+	float pressure_activation;
 	float normalized_x;
 	float normalized_y;
+	bool pressure_click_enabled;
 
 	noise_threshold =
 	    scaled_setting_or_default(IBEX_SETTING_TRACKPAD_NOISE_THRESHOLD, OLYMPUS_NOISE_THRESHOLD);
@@ -474,7 +588,13 @@ static void decode_pad(struct olympus_pad_state *state, const int16_t *x_samples
 	    scaled_setting_or_default(IBEX_SETTING_TIMP_TOUCH_THRESHOLD_OFF, OLYMPUS_RELEASE_THRESHOLD);
 	grip_touch = grip_touch_threshold();
 	grip_release = grip_release_threshold(grip_touch);
-	pressure_click_threshold = pad_click_threshold(right);
+	filtered_pressure =
+	    ((int32_t)raw_pressure + (OLYMPUS_PRESSURE_FILTER_WEIGHT - 1) * state->filtered_pressure) /
+	    OLYMPUS_PRESSURE_FILTER_WEIGHT;
+	state->filtered_pressure = (int16_t)filtered_pressure;
+	normalized_pressure = pad_pressure_normalized(right, state->filtered_pressure);
+	pressure_click_enabled = pad_pressure_enabled(right, &pressure_activation);
+	pressure_click_threshold = pad_click_threshold(right, state->pad_clicked);
 
 	normalized_x = expand_edge_position(electrode_centroid(x_samples, true, &peak_x));
 	normalized_y = expand_edge_position(electrode_centroid(y_samples, true, &peak_y));
@@ -482,8 +602,6 @@ static void decode_pad(struct olympus_pad_state *state, const int16_t *x_samples
 	peak = MAX(peak_x, peak_y);
 	touch_pressure = MAX(scale_touch_pressure_at_edge(peak_x, normalized_x),
 	                     scale_touch_pressure_at_edge(peak_y, normalized_y));
-
-	pressure_value = raw_pressure > 0 ? raw_pressure : 0;
 
 	if(!state->touched && touch_threshold > 3 * peak)
 	{
@@ -555,13 +673,22 @@ static void decode_pad(struct olympus_pad_state *state, const int16_t *x_samples
 		    registry_setting_or_default(IBEX_SETTING_OLYMPUS_CLICK_PRESS, OLYMPUS_CLICK_THRESHOLD);
 	}
 
-	if(state->pad_clicked)
+	if(!pressure_click_enabled)
 	{
-		state->pad_clicked = pressure_value >= (pressure_click_threshold * 3) / 4;
+		state->pad_clicked = false;
+	}
+	else if(state->pad_clicked)
+	{
+		float release_threshold =
+		    MAX(pressure_activation - OLYMPUS_PRESSURE_ACTIVE_HYSTERESIS, 0.0f);
+
+		state->pad_clicked = normalized_pressure > release_threshold;
 	}
 	else
 	{
-		state->pad_clicked = pressure_value >= pressure_click_threshold;
+		float press_threshold = MIN(pressure_activation + OLYMPUS_PRESSURE_ACTIVE_HYSTERESIS, 1.0f);
+
+		state->pad_clicked = normalized_pressure >= press_threshold;
 	}
 
 	raw_grip = grip_raw_for_source_state(raw_grip);
@@ -587,7 +714,7 @@ static void decode_pad(struct olympus_pad_state *state, const int16_t *x_samples
 		state->grip_touched = grip_value > grip_touch;
 	}
 
-	*pressure = scale_pad_pressure(pressure_value);
+	*pressure = scale_pad_pressure(right, normalized_pressure);
 	*touched = state->touched;
 	*stick_touched = state->stick_touched;
 	*clicked = state->pad_clicked;
@@ -657,31 +784,36 @@ static void olympus_process_sensor_payload(const uint8_t *payload)
 	           &right_clicked, &right_grip_touched, &debug.right);
 	click_suppress_mask = registry_setting_or_default(IBEX_SETTING_OLYMPUS_CLICK_SUPPRESS_MASK, 3);
 
-	if(left_clicked && (click_suppress_mask & BIT(0)))
+	if(left_stick_touched && (click_suppress_mask & BIT(0)))
 	{
 		left_x = 0;
 		left_y = 0;
 		left_pressure = 0;
 		left_touched = false;
-		left_stick_touched = false;
+		left_clicked = false;
 		debug.left.x = left_x;
 		debug.left.y = left_y;
 		debug.left.pressure = left_pressure;
 		debug.left.touched = left_touched;
-		debug.left.stick_touched = left_stick_touched;
+		debug.left.clicked = left_clicked;
 	}
-	if(right_clicked && (click_suppress_mask & BIT(1)))
+	if(right_stick_touched && (click_suppress_mask & BIT(1)))
 	{
 		right_x = 0;
 		right_y = 0;
 		right_pressure = 0;
 		right_touched = false;
-		right_stick_touched = false;
+		right_clicked = false;
 		debug.right.x = right_x;
 		debug.right.y = right_y;
 		debug.right.pressure = right_pressure;
 		debug.right.touched = right_touched;
-		debug.right.stick_touched = right_stick_touched;
+		debug.right.clicked = right_clicked;
+	}
+	if(transport_usb_configured() || transport_ble_connected() || transport_esb_connected())
+	{
+		haptics_touchpad_update(false, left_clicked, left_touched, left_x, left_y);
+		haptics_touchpad_update(true, right_clicked, right_touched, right_x, right_y);
 	}
 
 	next.touchpad_left_x = left_x;

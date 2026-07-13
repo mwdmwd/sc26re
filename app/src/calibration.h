@@ -32,15 +32,30 @@ struct stick_calibration
 	uint16_t y_center_max;
 } __packed;
 
+struct pressure_calibration
+{
+	uint16_t mode;
+	int16_t min;
+	int16_t max;
+	uint16_t pressure_scale;
+} __packed;
+
 bool calibration_trigger_valid(const struct trigger_calibration *cal);
 bool calibration_stick_valid(const struct stick_calibration *cal);
+bool calibration_pressure_valid(const struct pressure_calibration *cal);
 bool calibration_trigger_loaded(enum calibration_side side);
 bool calibration_stick_loaded(enum calibration_side side);
 const struct trigger_calibration *calibration_trigger(enum calibration_side side);
 const struct stick_calibration *calibration_stick(enum calibration_side side);
+bool calibration_pressure_loaded(enum calibration_side side);
+const struct pressure_calibration *calibration_pressure(enum calibration_side side);
 int calibration_load_settings(void);
 int calibration_import_valve_storage(void);
 bool calibration_read_trigger(enum calibration_side side, uint8_t *buf, size_t capacity,
                               size_t *len);
 int calibration_stage_trigger(enum calibration_side side, const uint8_t *value, size_t len);
 int calibration_commit_trigger(enum calibration_side side);
+bool calibration_read_pressure(enum calibration_side side, uint8_t *buf, size_t capacity,
+                               size_t *len);
+int calibration_stage_pressure(enum calibration_side side, const uint8_t *value, size_t len);
+int calibration_commit_pressure(enum calibration_side side);
