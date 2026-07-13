@@ -15,6 +15,7 @@
 
 #include "controller.h"
 #include "haptics.h"
+#include "lizard.h"
 #include "sdl/controller_structs.h"
 #include "triton_state_report.h"
 #include "valve_feature.h"
@@ -30,9 +31,13 @@ LOG_MODULE_REGISTER(transport_ble);
 
 #define VALVE_DEVICE_NAME_PREFIX "Steam Ctrl (BT) "
 #define VALVE_IDENTITY_COUNT 3
+#define VALVE_MOUSE_INPUT_ATTR 4
+#define VALVE_KEYBOARD_INPUT_ATTR 8
 #define VALVE_PRIMARY_INPUT_ATTR 12
 #define VALVE_BATTERY_INPUT_ATTR 16
 #define VALVE_BLE_STATE_INPUT_ATTR 24
+#define BLE_LIZARD_INPUT_QUEUE_DEPTH 16
+#define BLE_LIZARD_INPUT_MAX_SIZE 8
 
 BUILD_ASSERT(CONFIG_BT_ID_MAX >= VALVE_IDENTITY_COUNT,
              "CONFIG_BT_ID_MAX must be at least as large as VALVE_IDENTITY_COUNT");
@@ -61,6 +66,13 @@ struct valve_report
 	uint8_t data[VALVE_FEATURE_REPORT_SIZE];
 };
 
+struct ble_lizard_input_entry
+{
+	uint8_t id;
+	uint8_t len;
+	uint8_t data[BLE_LIZARD_INPUT_MAX_SIZE];
+};
+
 #define VALVE_REPORT(name, report_id, report_type, report_size) \
 	static struct valve_report name = { \
 		.id = report_id, \
@@ -75,6 +87,8 @@ static struct hids_info hids_info = {
 static uint8_t protocol_mode = 1;
 static uint8_t control_point;
 static uint8_t input_sequence;
+static bool mouse_input_notify_enabled;
+static bool keyboard_input_notify_enabled;
 static bool primary_input_notify_enabled;
 static bool ble_state_input_notify_enabled;
 static bool battery_input_notify_enabled;
@@ -86,6 +100,11 @@ static uint32_t input_no_subscription_logs;
 static uint32_t input_notify_error_logs;
 static uint32_t input_42_reports_sent;
 static uint32_t input_45_reports_sent;
+static struct ble_lizard_input_entry lizard_input_queue[BLE_LIZARD_INPUT_QUEUE_DEPTH];
+static struct k_spinlock lizard_input_queue_lock;
+static uint8_t lizard_input_queue_head;
+static uint8_t lizard_input_queue_count;
+static atomic_t lizard_input_queue_draining;
 
 VALVE_REPORT(input_40, 0x40, HIDS_INPUT, 5);
 VALVE_REPORT(input_41, 0x41, HIDS_INPUT, 8);
@@ -219,6 +238,14 @@ static void input_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 	{
 		battery_input_notify_enabled = enabled;
 	}
+	else if(report == &input_40)
+	{
+		mouse_input_notify_enabled = enabled;
+	}
+	else if(report == &input_41)
+	{
+		keyboard_input_notify_enabled = enabled;
+	}
 	else if(report == &input_42)
 	{
 		primary_input_notify_enabled = enabled;
@@ -226,6 +253,10 @@ static void input_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 	else if(report == &input_45)
 	{
 		ble_state_input_notify_enabled = enabled;
+	}
+	if(enabled && (report == &input_40 || report == &input_41))
+	{
+		lizard_transport_reset();
 	}
 	LOG_INF("BLE report 0x%02x notifications %s", report->id, enabled ? "enabled" : "disabled");
 }
@@ -297,6 +328,100 @@ BT_GATT_SERVICE_DEFINE(hog_service,
 			       BT_GATT_PERM_WRITE_ENCRYPT, NULL, write_byte,
 			       &control_point));
 // clang-format on
+
+static struct valve_report *ble_lizard_report(uint8_t report_id, uint8_t *attr_index,
+                                              bool *notify_enabled)
+{
+	switch(report_id)
+	{
+		case 0x40:
+			*attr_index = VALVE_MOUSE_INPUT_ATTR;
+			*notify_enabled = mouse_input_notify_enabled;
+			return &input_40;
+		case 0x41:
+			*attr_index = VALVE_KEYBOARD_INPUT_ATTR;
+			*notify_enabled = keyboard_input_notify_enabled;
+			return &input_41;
+		default:
+			return NULL;
+	}
+}
+
+static void ble_lizard_input_queue_reset(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&lizard_input_queue_lock);
+
+	lizard_input_queue_head = 0;
+	lizard_input_queue_count = 0;
+	k_spin_unlock(&lizard_input_queue_lock, key);
+}
+
+static int ble_lizard_input_queue_drain(void)
+{
+	int result = 0;
+
+	if(!atomic_cas(&lizard_input_queue_draining, 0, 1))
+	{
+		return 0;
+	}
+
+	while(active_conn != NULL)
+	{
+		struct ble_lizard_input_entry entry;
+		struct valve_report *report;
+		k_spinlock_key_t key;
+		bool notify_enabled = false;
+		uint8_t attr_index = 0;
+		int err;
+
+		key = k_spin_lock(&lizard_input_queue_lock);
+		if(lizard_input_queue_count == 0)
+		{
+			k_spin_unlock(&lizard_input_queue_lock, key);
+			break;
+		}
+		entry = lizard_input_queue[lizard_input_queue_head];
+		k_spin_unlock(&lizard_input_queue_lock, key);
+
+		report = ble_lizard_report(entry.id, &attr_index, &notify_enabled);
+		if(report == NULL || entry.len != report->size || !notify_enabled)
+		{
+			err = -ENOTCONN;
+		}
+		else
+		{
+			memcpy(report->data, entry.data, entry.len);
+			err = bt_gatt_notify(active_conn, &hog_service.attrs[attr_index], report->data,
+			                     report->size);
+		}
+
+		if(err == -ENOMEM)
+		{
+			result = -EAGAIN;
+			break;
+		}
+
+		key = k_spin_lock(&lizard_input_queue_lock);
+		if(lizard_input_queue_count != 0)
+		{
+			lizard_input_queue_head =
+			    (lizard_input_queue_head + 1U) % ARRAY_SIZE(lizard_input_queue);
+			lizard_input_queue_count--;
+		}
+		k_spin_unlock(&lizard_input_queue_lock, key);
+		if(err)
+		{
+			result = err;
+		}
+		else
+		{
+			result = 0;
+		}
+	}
+
+	atomic_clear(&lizard_input_queue_draining);
+	return result;
+}
 
 static const struct bt_data advertising[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_LIMITED | BT_LE_AD_NO_BREDR),
@@ -558,6 +683,9 @@ static void ble_disconnected_cb(struct bt_conn *conn, uint8_t reason)
 	primary_input_notify_enabled = false;
 	ble_state_input_notify_enabled = false;
 	battery_input_notify_enabled = false;
+	mouse_input_notify_enabled = false;
+	keyboard_input_notify_enabled = false;
+	ble_lizard_input_queue_reset();
 }
 
 bool transport_ble_connected(void)
@@ -696,6 +824,9 @@ void transport_ble_deactivate(void)
 	primary_input_notify_enabled = false;
 	ble_state_input_notify_enabled = false;
 	battery_input_notify_enabled = false;
+	mouse_input_notify_enabled = false;
+	keyboard_input_notify_enabled = false;
+	ble_lizard_input_queue_reset();
 	ble_started = false;
 }
 
@@ -707,6 +838,8 @@ static void fill_state_report(struct valve_report *state, const struct controlle
 
 int transport_ble_send(const struct controller_report *report)
 {
+	(void)ble_lizard_input_queue_drain();
+
 	if(!primary_input_notify_enabled && !ble_state_input_notify_enabled)
 	{
 		if(input_no_subscription_logs < 8)
@@ -771,6 +904,48 @@ int transport_ble_send(const struct controller_report *report)
 		LOG_WRN("BLE report 0x42 notify failed: %d", err);
 	}
 	return err == -ENOMEM ? -EAGAIN : err;
+}
+
+int transport_ble_send_input_report(uint8_t report_id, const uint8_t *data, size_t len)
+{
+	struct ble_lizard_input_entry *entry;
+	struct valve_report *report;
+	k_spinlock_key_t key;
+	bool notify_enabled = false;
+	uint8_t attr_index = 0;
+	uint8_t tail;
+	int err;
+
+	if(active_conn == NULL)
+	{
+		return -ENOTCONN;
+	}
+	report = ble_lizard_report(report_id, &attr_index, &notify_enabled);
+	if(report == NULL || data == NULL || len != report->size || len > BLE_LIZARD_INPUT_MAX_SIZE)
+	{
+		return -EINVAL;
+	}
+	if(!notify_enabled)
+	{
+		return -ENOTCONN;
+	}
+
+	key = k_spin_lock(&lizard_input_queue_lock);
+	if(lizard_input_queue_count == ARRAY_SIZE(lizard_input_queue))
+	{
+		k_spin_unlock(&lizard_input_queue_lock, key);
+		return -ENOMEM;
+	}
+	tail = (lizard_input_queue_head + lizard_input_queue_count) % ARRAY_SIZE(lizard_input_queue);
+	entry = &lizard_input_queue[tail];
+	entry->id = report_id;
+	entry->len = len;
+	memcpy(entry->data, data, len);
+	lizard_input_queue_count++;
+	k_spin_unlock(&lizard_input_queue_lock, key);
+
+	err = ble_lizard_input_queue_drain();
+	return err == -EAGAIN ? 0 : err;
 }
 
 int transport_ble_send_battery_status(const struct controller_battery_report *report)

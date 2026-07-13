@@ -130,7 +130,9 @@ static const struct ibex_setting_entry setting_entries[IBEX_SETTING_COUNT] = {
 
 static int16_t setting_values[IBEX_SETTING_COUNT];
 static ibex_setting_changed_cb_t callbacks[IBEX_SETTINGS_MAX_CALLBACKS];
+static ibex_setting_changed_cb_t set_callbacks[IBEX_SETTINGS_MAX_CALLBACKS];
 static uint8_t callback_count;
+static uint8_t set_callback_count;
 
 static bool validate_id(uint8_t id)
 {
@@ -158,6 +160,14 @@ static void notify_changed(uint8_t id, int16_t value)
 	for(uint8_t i = 0; i < callback_count; ++i)
 	{
 		callbacks[i](id, value);
+	}
+}
+
+static void notify_set(uint8_t id, int16_t value)
+{
+	for(uint8_t i = 0; i < set_callback_count; ++i)
+	{
+		set_callbacks[i](id, value);
 	}
 }
 
@@ -305,6 +315,7 @@ int ibex_setting_set(uint8_t id, int16_t value)
 		setting_values[id] = clamped;
 		notify_changed(id, clamped);
 	}
+	notify_set(id, clamped);
 	return 0;
 }
 
@@ -315,6 +326,20 @@ int ibex_settings_register_callback(ibex_setting_changed_cb_t callback)
 		return -ENOMEM;
 	}
 	callbacks[callback_count++] = callback;
+	for(uint8_t i = 0; i < IBEX_SETTING_COUNT; ++i)
+	{
+		callback(i, setting_values[i]);
+	}
+	return 0;
+}
+
+int ibex_settings_register_set_callback(ibex_setting_changed_cb_t callback)
+{
+	if(set_callback_count >= ARRAY_SIZE(set_callbacks))
+	{
+		return -ENOMEM;
+	}
+	set_callbacks[set_callback_count++] = callback;
 	for(uint8_t i = 0; i < IBEX_SETTING_COUNT; ++i)
 	{
 		callback(i, setting_values[i]);

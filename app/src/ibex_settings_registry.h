@@ -45,6 +45,7 @@ const char *ibex_setting_name_source(uint8_t id);
 const char *ibex_setting_persist_path(uint8_t id);
 int ibex_setting_set(uint8_t id, int16_t value);
 int ibex_settings_register_callback(ibex_setting_changed_cb_t callback);
+int ibex_settings_register_set_callback(ibex_setting_changed_cb_t callback);
 
 bool ibex_settings_feature_response(const uint8_t *request, size_t request_len, uint8_t *response,
                                     size_t response_capacity, size_t *response_len);

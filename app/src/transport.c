@@ -114,6 +114,15 @@ __weak int transport_ble_send_battery_status(const struct controller_battery_rep
 	return -ENOTSUP;
 }
 
+__weak int transport_ble_send_input_report(uint8_t report_id, const uint8_t *data, size_t len)
+{
+	ARG_UNUSED(report_id);
+	ARG_UNUSED(data);
+	ARG_UNUSED(len);
+
+	return -ENOTSUP;
+}
+
 __weak int transport_usb_send_battery_status(const struct controller_battery_report *report)
 {
 	ARG_UNUSED(report);
@@ -121,9 +130,27 @@ __weak int transport_usb_send_battery_status(const struct controller_battery_rep
 	return -ENOTSUP;
 }
 
+__weak int transport_usb_send_input_report(uint8_t report_id, const uint8_t *data, size_t len)
+{
+	ARG_UNUSED(report_id);
+	ARG_UNUSED(data);
+	ARG_UNUSED(len);
+
+	return -ENOTSUP;
+}
+
 __weak int transport_esb_send_battery_status(const struct controller_battery_report *report)
 {
 	ARG_UNUSED(report);
+
+	return -ENOTSUP;
+}
+
+__weak int transport_esb_send_input_report(uint8_t report_id, const uint8_t *data, size_t len)
+{
+	ARG_UNUSED(report_id);
+	ARG_UNUSED(data);
+	ARG_UNUSED(len);
 
 	return -ENOTSUP;
 }
@@ -375,6 +402,56 @@ int transport_send_battery_status(const struct controller_battery_report *report
 		return ble_err;
 	}
 	if(esb_err != -ENOTSUP && esb_err != -ENOTCONN)
+	{
+		return esb_err;
+	}
+
+	return -ENOTCONN;
+}
+
+int transport_send_input_report(uint8_t report_id, const uint8_t *data, size_t len)
+{
+	int ble_err = -ENOTSUP;
+	int usb_err = -ENOTSUP;
+	int esb_err = -ENOTSUP;
+
+	if(data == NULL || len == 0)
+	{
+		return -EINVAL;
+	}
+
+	if(IS_ENABLED(CONFIG_IBEX_USB_HID) && !transport_usb_reports_suppressed())
+	{
+		usb_err = transport_usb_send_input_report(report_id, data, len);
+		if(transport_usb_configured())
+		{
+			return usb_err;
+		}
+	}
+
+	if(IS_ENABLED(CONFIG_IBEX_BLE) && radio_personality_get() == RADIO_PERSONALITY_BLE)
+	{
+		ble_err = transport_ble_send_input_report(report_id, data, len);
+	}
+
+	if(IS_ENABLED(CONFIG_IBEX_ESB) && radio_personality_get() == RADIO_PERSONALITY_ESB)
+	{
+		esb_err = transport_esb_send_input_report(report_id, data, len);
+	}
+
+	if(usb_err == 0 || ble_err == 0 || esb_err == 0)
+	{
+		return 0;
+	}
+	if(usb_err != -ENOTSUP && usb_err != -ENOTCONN && usb_err != -EAGAIN && usb_err != -EBUSY)
+	{
+		return usb_err;
+	}
+	if(ble_err != -ENOTSUP && ble_err != -ENOTCONN && ble_err != -EAGAIN && ble_err != -EBUSY)
+	{
+		return ble_err;
+	}
+	if(esb_err != -ENOTSUP && esb_err != -ENOTCONN && esb_err != -EAGAIN && esb_err != -EBUSY)
 	{
 		return esb_err;
 	}

@@ -111,6 +111,7 @@ int hardware_haptic_tone(uint32_t frequency_hz, uint32_t duration_ms);
 int transport_init(void);
 int transport_send(const struct controller_report *report);
 int transport_send_battery_status(const struct controller_battery_report *report);
+int transport_send_input_report(uint8_t report_id, const uint8_t *data, size_t len);
 
 enum transport_usb_radio_mode
 {
@@ -123,6 +124,7 @@ enum transport_usb_radio_mode
 int transport_ble_init(void);
 int transport_ble_send(const struct controller_report *report);
 int transport_ble_send_battery_status(const struct controller_battery_report *report);
+int transport_ble_send_input_report(uint8_t report_id, const uint8_t *data, size_t len);
 void transport_ble_deactivate(void);
 int transport_ble_clear_bonds(uint8_t id);
 bool transport_ble_connected(void);
@@ -136,10 +138,12 @@ void transport_enter_usb_mode(void);
 int transport_usb_init(void);
 int transport_usb_send(const struct controller_report *report);
 int transport_usb_send_battery_status(const struct controller_battery_report *report);
+int transport_usb_send_input_report(uint8_t report_id, const uint8_t *data, size_t len);
 
 int transport_esb_init(void);
 int transport_esb_send(const struct controller_report *report);
 int transport_esb_send_battery_status(const struct controller_battery_report *report);
+int transport_esb_send_input_report(uint8_t report_id, const uint8_t *data, size_t len);
 void transport_esb_deactivate(void);
 bool transport_esb_connected(void);
 uint8_t transport_esb_channel(void);

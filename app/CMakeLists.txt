@@ -15,6 +15,7 @@ target_sources(app PRIVATE
 	src/haptics.c
 	src/ibex_settings_registry.c
 	src/imu.c
+	src/lizard.c
 	src/main.c
 	src/power.c
 	src/puck_interface.c

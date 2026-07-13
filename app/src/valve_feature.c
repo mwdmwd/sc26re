@@ -11,6 +11,7 @@
 #include "controller.h"
 #include "ibex_settings_registry.h"
 #include "imu.h"
+#include "lizard.h"
 #include "power.h"
 #include "valve_feature.h"
 #include "valve_identity.h"
@@ -575,9 +576,17 @@ static int handle_feature_request(enum valve_feature_link link, const uint8_t *r
 		}
 		case VALVE_FEATURE_CLEAR_DIGITAL_MAPPINGS:
 			digital_mappings_len = 0;
+			if(link != VALVE_FEATURE_LINK_PUCK)
+			{
+				lizard_clear_digital_mappings();
+			}
 			return 0;
 		case VALVE_FEATURE_SET_DEFAULT_DIGITAL_MAPPINGS:
 			digital_mappings_len = 0;
+			if(link != VALVE_FEATURE_LINK_PUCK)
+			{
+				lizard_set_default_digital_mappings();
+			}
 			return 0;
 		case VALVE_FEATURE_CALIBRATE_GYRO:
 			return imu_calibrate_gyro();

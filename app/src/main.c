@@ -10,6 +10,7 @@
 #include "charge_mode.h"
 #include "controller.h"
 #include "ibex_settings_registry.h"
+#include "lizard.h"
 #include "power.h"
 #include "puck_interface.h"
 #include "watchdog.h"
@@ -93,6 +94,12 @@ int main(void)
 	}
 	radio_personality_init();
 	ibex_settings_registry_init();
+	err = lizard_init();
+	if(err)
+	{
+		LOG_ERR("lizard mode initialization failed: %d", err);
+		return err;
+	}
 
 	err = hardware_init();
 	if(err)
@@ -168,6 +175,7 @@ int main(void)
 		struct controller_report current;
 
 		hardware_read_report(&current);
+		lizard_update(&current);
 		if((current.buttons & BIT(CONTROLLER_BUTTON_STEAM)) != 0U)
 		{
 			if(steam_button_since == 0)
