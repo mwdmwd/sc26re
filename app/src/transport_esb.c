@@ -4,7 +4,6 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/settings/settings.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
 
@@ -17,6 +16,7 @@
 #include "triton_state_report.h"
 #include "valve_feature.h"
 #include "valve_identity.h"
+#include "valve_settings.h"
 
 LOG_MODULE_REGISTER(transport_esb);
 
@@ -53,6 +53,7 @@ enum
 	ESB_CHANNEL_SCAN_INITIAL_MS = 328,
 	ESB_CHANNEL_SCAN_INTERVAL_MS = 426,
 	ESB_LEGACY_FEATURE_FALLBACK_MS = 50,
+	ESB_BOND_CHANGE_DEFER_MS = 1,
 	ESB_LIZARD_INPUT_QUEUE_DEPTH = 32,
 	ESB_LIZARD_INPUT_MAX_SIZE = 8,
 };
@@ -105,13 +106,16 @@ static uint8_t pending_map_channel = ESB_CHANNEL_UNUSED;
 static int64_t last_host_rx_ms;
 static bool session_connected;
 static atomic_t session_connected_public;
+static atomic_t bond_change_pending;
 static bool esb_started;
 static uint32_t host_frames_received;
 static uint32_t channel_maps_received;
 static uint32_t awake_frames_received;
 static uint32_t polls_received;
 static uint32_t replies_sent;
-static uint8_t pairing_bond[24];
+static struct k_spinlock pairing_bond_lock;
+static uint8_t pairing_bond[VALVE_ESB_BOND_SIZE];
+static uint8_t pairing_bond_slot = UINT8_MAX;
 static bool pairing_bond_valid;
 
 enum
@@ -125,41 +129,54 @@ static uint8_t unknown_host_opcode_logs_remaining = 8;
 
 static void queue_latest_input(uint8_t requested_report_id);
 static void feature_response_fallback_work_handler(struct k_work *work);
+static void bond_change_work_handler(struct k_work *work);
 
 K_WORK_DELAYABLE_DEFINE(feature_response_fallback_work, feature_response_fallback_work_handler);
+K_WORK_DELAYABLE_DEFINE(bond_change_work, bond_change_work_handler);
 
-static int esb_settings_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg)
+static void refresh_pairing_bond(void)
 {
-	ssize_t read_len;
+	uint8_t bond[VALVE_ESB_BOND_SIZE] = { 0 };
+	uint8_t slot = UINT8_MAX;
+	k_spinlock_key_t key;
+	bool valid;
+	bool changed;
 
-	if(strcmp(name, "bond") != 0)
+	valid = valve_settings_copy_active_esb_bond(bond, sizeof(bond), &slot);
+	key = k_spin_lock(&pairing_bond_lock);
+	changed = valid != pairing_bond_valid ||
+	          slot != pairing_bond_slot ||
+	          (valid && memcmp(pairing_bond, bond, sizeof(bond)) != 0);
+	memcpy(pairing_bond, bond, sizeof(pairing_bond));
+	pairing_bond_slot = slot;
+	pairing_bond_valid = valid;
+	k_spin_unlock(&pairing_bond_lock, key);
+
+	if(changed && valid)
 	{
-		return -ENOENT;
+		LOG_INF("selected ESB bond slot %u %08x/%08x for puck %.*s", slot, sys_get_le32(&bond[0]),
+		        sys_get_le32(&bond[4]), 16, &bond[8]);
 	}
-	if(len != sizeof(pairing_bond))
+	else if(changed)
 	{
-		return -EINVAL;
+		LOG_INF("no active ESB bond selected");
 	}
 
-	read_len = read_cb(cb_arg, pairing_bond, sizeof(pairing_bond));
-	if(read_len < 0)
+	if(changed && esb_started)
 	{
-		return read_len;
+		atomic_set(&bond_change_pending, 1);
+		k_work_reschedule(&bond_change_work, K_MSEC(ESB_BOND_CHANGE_DEFER_MS));
 	}
-	if(read_len != sizeof(pairing_bond))
-	{
-		return -EINVAL;
-	}
-
-	pairing_bond_valid = true;
-	return 0;
 }
-
-SETTINGS_STATIC_HANDLER_DEFINE(esb, "esb", NULL, esb_settings_set, NULL, NULL);
 
 static int queue_payload(const struct valve_esb_payload *payload)
 {
 	int err;
+
+	if(atomic_get(&bond_change_pending) != 0)
+	{
+		return -ECANCELED;
+	}
 
 	err = valve_esb_backend_write_payload(payload);
 	if(err && err != -ENOMEM)
@@ -358,7 +375,7 @@ static void session_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
-	if(!esb_started || !session_pending)
+	if(!esb_started || !session_pending || atomic_get(&bond_change_pending) != 0)
 	{
 		return;
 	}
@@ -431,8 +448,79 @@ out:
 
 K_WORK_DELAYABLE_DEFINE(channel_scan_work, channel_scan_work_handler);
 
+static void bond_change_work_handler(struct k_work *work)
+{
+	k_spinlock_key_t key;
+	int err;
+
+	ARG_UNUSED(work);
+
+	if(!esb_started)
+	{
+		atomic_clear(&bond_change_pending);
+		return;
+	}
+
+	/* Prevent queued work for the previous puck from rebuilding its session. */
+	k_work_cancel(&session_work);
+	k_work_cancel(&channel_map_work);
+	k_work_cancel_delayable(&channel_scan_work);
+	k_work_cancel_delayable(&feature_response_fallback_work);
+
+	session_connected = false;
+	atomic_clear(&session_connected_public);
+	session_pending = false;
+	pending_channel = ESB_DISCOVERY_CHANNEL;
+	memset(pending_base, 0, sizeof(pending_base));
+	pending_prefix = 0;
+	pending_map_channel = ESB_CHANNEL_UNUSED;
+	channel_map[0] = ESB_DISCOVERY_CHANNEL;
+	for(size_t i = 1; i < ARRAY_SIZE(channel_map); ++i)
+	{
+		channel_map[i] = ESB_CHANNEL_UNUSED;
+	}
+	channel_map_index = 0;
+	last_host_rx_ms = k_uptime_get();
+	report_sequence = 0;
+	rejected_host_frame_logs_remaining = 8;
+
+	key = k_spin_lock(&latest_input_lock);
+	pending_feature_response_len = 0;
+	last_feature_response_len = 0;
+	pending_write_result_valid = false;
+	legacy_feature_fallback_pending = false;
+	latest_input_valid = false;
+	latest_battery_valid = false;
+	lizard_input_queue_head = 0;
+	lizard_input_queue_count = 0;
+	k_spin_unlock(&latest_input_lock, key);
+
+	configure_address(discovery_base, discovery_prefix);
+	if(!esb_started)
+	{
+		atomic_clear(&bond_change_pending);
+		return;
+	}
+
+	err = valve_esb_backend_start_rx();
+	atomic_clear(&bond_change_pending);
+	if(err)
+	{
+		LOG_WRN("failed to restart ESB discovery after active bond change: %d", err);
+	}
+	else
+	{
+		k_work_schedule(&channel_scan_work, K_MSEC(ESB_CHANNEL_SCAN_INTERVAL_MS));
+		LOG_INF("ESB discovery restarted after active bond change");
+	}
+}
+
 static void handle_host_frame(const struct valve_esb_payload *payload)
 {
+	uint8_t expected_bond[8];
+	k_spinlock_key_t key;
+	bool bond_valid;
+
 	if(payload->length < 18)
 	{
 		if(rejected_host_frame_logs_remaining != 0)
@@ -442,14 +530,22 @@ static void handle_host_frame(const struct valve_esb_payload *payload)
 		}
 		return;
 	}
-	if(!pairing_bond_valid || memcmp(&payload->data[1], pairing_bond, 8) != 0)
+	if(atomic_get(&bond_change_pending) != 0)
+	{
+		return;
+	}
+
+	key = k_spin_lock(&pairing_bond_lock);
+	bond_valid = pairing_bond_valid;
+	memcpy(expected_bond, pairing_bond, sizeof(expected_bond));
+	k_spin_unlock(&pairing_bond_lock, key);
+	if(!bond_valid || memcmp(&payload->data[1], expected_bond, sizeof(expected_bond)) != 0)
 	{
 		if(rejected_host_frame_logs_remaining != 0)
 		{
 			LOG_INF("ignoring ESB E1 %08x/%08x; bond loaded=%u expected=%08x/%08x",
-			        sys_get_le32(&payload->data[1]), sys_get_le32(&payload->data[5]),
-			        pairing_bond_valid, sys_get_le32(&pairing_bond[0]),
-			        sys_get_le32(&pairing_bond[4]));
+			        sys_get_le32(&payload->data[1]), sys_get_le32(&payload->data[5]), bond_valid,
+			        sys_get_le32(&expected_bond[0]), sys_get_le32(&expected_bond[4]));
 			rejected_host_frame_logs_remaining--;
 		}
 		return;
@@ -782,6 +878,11 @@ static void event_handler(const struct valve_esb_backend_event *event)
 				{
 					continue;
 				}
+				/* Drain stale traffic without letting the previous puck rebuild state. */
+				if(atomic_get(&bond_change_pending) != 0)
+				{
+					continue;
+				}
 				last_host_rx_ms = k_uptime_get();
 				switch(rx_payload.data[0])
 				{
@@ -820,18 +921,11 @@ int transport_esb_init(void)
 	struct valve_esb_backend_config config = VALVE_ESB_BACKEND_DEFAULT_CONFIG;
 	int err;
 
-	if(IS_ENABLED(CONFIG_SETTINGS))
+	atomic_clear(&bond_change_pending);
+	err = valve_settings_register_esb_bond_changed_callback(refresh_pairing_bond);
+	if(err)
 	{
-		err = settings_load_subtree("esb");
-		if(err)
-		{
-			LOG_WRN("failed to load ESB settings: %d", err);
-		}
-		else if(pairing_bond_valid)
-		{
-			LOG_INF("loaded ESB bond %08x/%08x for puck %.*s", sys_get_le32(&pairing_bond[0]),
-			        sys_get_le32(&pairing_bond[4]), 16, &pairing_bond[8]);
-		}
+		return err;
 	}
 
 	config.event_handler = event_handler;
@@ -876,6 +970,7 @@ void transport_esb_deactivate(void)
 	/* Cancel pending and in-flight work before touching the backend. */
 	if(k_current_get() == k_work_queue_thread_get(&k_sys_work_q))
 	{
+		k_work_cancel_delayable(&bond_change_work);
 		k_work_cancel(&channel_map_work);
 		k_work_cancel(&session_work);
 		k_work_cancel_delayable(&channel_scan_work);
@@ -884,6 +979,7 @@ void transport_esb_deactivate(void)
 	else
 	{
 		struct k_work_sync sync;
+		k_work_cancel_delayable_sync(&bond_change_work, &sync);
 		k_work_cancel_sync(&channel_map_work, &sync);
 		k_work_cancel_sync(&session_work, &sync);
 		k_work_cancel_delayable_sync(&channel_scan_work, &sync);
@@ -901,6 +997,7 @@ void transport_esb_deactivate(void)
 	lizard_input_queue_head = 0;
 	lizard_input_queue_count = 0;
 	k_spin_unlock(&latest_input_lock, key);
+	atomic_clear(&bond_change_pending);
 }
 
 static void build_input_payload(struct valve_esb_payload *payload, uint8_t report_id,
@@ -1078,40 +1175,48 @@ uint32_t transport_esb_backend_rx_dropped_events(void)
 
 bool transport_esb_bond_loaded(void)
 {
-	return pairing_bond_valid;
+	k_spinlock_key_t key;
+	bool loaded;
+
+	key = k_spin_lock(&pairing_bond_lock);
+	loaded = pairing_bond_valid;
+	k_spin_unlock(&pairing_bond_lock, key);
+	return loaded;
 }
 
-int transport_esb_provision_bond(uint32_t proteus_uuid, uint32_t ibex_uuid, const char *serial)
+int transport_esb_provision_bond(uint8_t slot, uint32_t proteus_uuid, uint32_t ibex_uuid,
+                                 const char *serial)
 {
-	memset(pairing_bond, 0, sizeof(pairing_bond));
-	sys_put_le32(proteus_uuid, &pairing_bond[0]);
-	sys_put_le32(ibex_uuid, &pairing_bond[4]);
+	uint8_t bond[VALVE_ESB_BOND_SIZE] = { 0 };
+	int err;
+
+	if(slot >= VALVE_ESB_BOND_SLOT_COUNT)
+	{
+		return -EINVAL;
+	}
+
+	sys_put_le32(proteus_uuid, &bond[0]);
+	sys_put_le32(ibex_uuid, &bond[4]);
 	if(serial != NULL && serial[0] != '\0')
 	{
-		memcpy(&pairing_bond[ESB_BOND_SERIAL_OFFSET], serial,
+		memcpy(&bond[ESB_BOND_SERIAL_OFFSET], serial,
 		       MIN(strlen(serial), ESB_BOND_SERIAL_STORED_SIZE));
 	}
 	else
 	{
-		valve_identity_copy_serial(VALVE_IDENTITY_UNIT_SERIAL,
-		                           &pairing_bond[ESB_BOND_SERIAL_OFFSET],
+		valve_identity_copy_serial(VALVE_IDENTITY_UNIT_SERIAL, &bond[ESB_BOND_SERIAL_OFFSET],
 		                           ESB_BOND_SERIAL_STORED_SIZE);
 	}
 
-	pairing_bond_valid = true;
-	if(IS_ENABLED(CONFIG_SETTINGS))
+	err = valve_settings_save_esb_bond(slot, bond, sizeof(bond), true);
+	if(err)
 	{
-		int err = settings_save_one("esb/bond", pairing_bond, sizeof(pairing_bond));
-
-		if(err)
-		{
-			LOG_ERR("failed to provision ESB bond: %d", err);
-			return err;
-		}
+		LOG_ERR("failed to provision ESB bond slot %u: %d", slot, err);
+		return err;
 	}
 
-	LOG_INF("provisioned ESB bond %08x/%08x for %.*s", sys_get_le32(&pairing_bond[0]),
-	        sys_get_le32(&pairing_bond[4]), 16, &pairing_bond[8]);
+	LOG_INF("provisioned ESB bond slot %u %08x/%08x for %.*s", slot, sys_get_le32(&bond[0]),
+	        sys_get_le32(&bond[4]), 16, &bond[8]);
 	return 0;
 }
 

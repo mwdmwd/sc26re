@@ -223,6 +223,16 @@ static void log_feature_request(enum valve_feature_link link, const uint8_t *req
 	{
 		log_settings_write(link, request, len);
 	}
+	else if(opcode == VALVE_FEATURE_READ_SETTING)
+	{
+		char path[VALVE_SETTINGS_PATH_MAX];
+		size_t value_offset;
+
+		if(request_path(request, len, path, sizeof(path), &value_offset))
+		{
+			LOG_INF("%s read setting %s", feature_link_name(link), path);
+		}
+	}
 }
 
 static void prepare_device_attributes(enum valve_feature_link link, uint8_t **cursor)

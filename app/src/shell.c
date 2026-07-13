@@ -17,6 +17,7 @@
 #include "power.h"
 #include "rgbw_led.h"
 #include "valve_identity.h"
+#include "valve_settings.h"
 
 static int cmd_reboot(const struct shell *shell, size_t argc, char **argv)
 {
@@ -159,6 +160,7 @@ static int cmd_radio_esb(const struct shell *shell, size_t argc, char **argv)
 
 static int cmd_radio_esb_bond(const struct shell *shell, size_t argc, char **argv)
 {
+	unsigned long slot;
 	unsigned long proteus_uuid;
 	unsigned long ibex_uuid;
 	const char *serial = NULL;
@@ -175,38 +177,46 @@ static int cmd_radio_esb_bond(const struct shell *shell, size_t argc, char **arg
 		return -ENOTSUP;
 	}
 
-	proteus_uuid = shell_strtoul(argv[1], 16, &err);
+	slot = shell_strtoul(argv[1], 10, &err);
+	if(err || slot >= VALVE_ESB_BOND_SLOT_COUNT)
+	{
+		shell_error(shell, "invalid ESB bond slot (expected 0 or 1)");
+		return -EINVAL;
+	}
+	err = 0;
+	proteus_uuid = shell_strtoul(argv[2], 16, &err);
 	if(err || proteus_uuid > UINT32_MAX)
 	{
 		shell_error(shell, "invalid proteus UUID word");
 		return -EINVAL;
 	}
 	err = 0;
-	ibex_uuid = shell_strtoul(argv[2], 16, &err);
+	ibex_uuid = shell_strtoul(argv[3], 16, &err);
 	if(err || ibex_uuid > UINT32_MAX)
 	{
 		shell_error(shell, "invalid ibex UUID word");
 		return -EINVAL;
 	}
-	if(argc > 3)
+	if(argc > 4)
 	{
-		if(strlen(argv[3]) > ESB_BOND_SERIAL_INPUT_SIZE)
+		if(strlen(argv[4]) > ESB_BOND_SERIAL_INPUT_SIZE)
 		{
 			shell_error(shell, "serial must be at most %u bytes", ESB_BOND_SERIAL_INPUT_SIZE);
 			return -EINVAL;
 		}
-		serial = argv[3];
+		serial = argv[4];
 	}
 
-	err = transport_esb_provision_bond((uint32_t)proteus_uuid, (uint32_t)ibex_uuid, serial);
+	err = transport_esb_provision_bond((uint8_t)slot, (uint32_t)proteus_uuid, (uint32_t)ibex_uuid,
+	                                   serial);
 	if(err)
 	{
 		shell_error(shell, "ESB bond provision failed: %d", err);
 		return err;
 	}
 
-	shell_print(shell, "ESB bond provisioned: %08x/%08x serial=%s", (uint32_t)proteus_uuid,
-	            (uint32_t)ibex_uuid,
+	shell_print(shell, "ESB bond slot %u provisioned: %08x/%08x serial=%s", (uint8_t)slot,
+	            (uint32_t)proteus_uuid, (uint32_t)ibex_uuid,
 	            serial ? serial : valve_identity_serial(VALVE_IDENTITY_UNIT_SERIAL));
 	return 0;
 }
@@ -671,8 +681,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
     SHELL_CMD_ARG(ble_unpair, NULL, "Clear BLE bonds [identity]", cmd_radio_ble_unpair, 1, 1),
 #endif
     SHELL_CMD(esb, NULL, "Reboot into ESB personality", cmd_radio_esb),
-    SHELL_CMD_ARG(esb_bond, NULL, "Provision ESB bond <proteus_uuid> <ibex_uuid> [serial]",
-                  cmd_radio_esb_bond, 3, 1),
+    SHELL_CMD_ARG(esb_bond, NULL,
+                  "Provision ESB bond <slot:0|1> <proteus_uuid> <ibex_uuid> [serial]",
+                  cmd_radio_esb_bond, 4, 1),
     SHELL_CMD(esb_regs, NULL, "Dump ESB radio registers", cmd_radio_esb_regs),
     SHELL_CMD(status, NULL, "Show active radio personality", cmd_radio_status),
     SHELL_CMD_ARG(usb_debug, NULL, "Allow radio and suppress USB HID reports <on|off>",

@@ -3,10 +3,12 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/util.h>
 
 #include "calibration.h"
 #include "ibex_settings_registry.h"
@@ -15,42 +17,252 @@
 
 LOG_MODULE_REGISTER(valve_settings);
 
-#define VALVE_ESB_BOND_SIZE 24
+#define VALVE_ESB_SLOT_0_TRANSPORT 2
+#define VALVE_ESB_SLOT_1_TRANSPORT 3
 #define VALVE_NVS_CHUNK_SIZE 48
 #define VALVE_NVS_INFO_SIZE 8
+#define VALVE_WIRELESS_TRANSPORT_PATH "user/wireless_transport"
 
-static uint8_t esb_bond[VALVE_ESB_BOND_SIZE];
-static bool esb_bond_valid;
-static bool esb_bond_dirty;
+static const char *const esb_bond_paths[VALVE_ESB_BOND_SLOT_COUNT] = {
+	"esb/bond",
+	"esb/bond_2",
+};
 
-static int load_esb_bond_cb(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg,
-                            void *param)
+struct esb_bond
 {
-	uint8_t *bond = param;
+	uint8_t data[VALVE_ESB_BOND_SIZE];
+	bool valid;
+};
+
+struct esb_bond_slot
+{
+	struct esb_bond staged;
+	struct esb_bond active;
+	bool dirty;
+};
+
+static struct esb_bond_slot esb_bonds[VALVE_ESB_BOND_SLOT_COUNT];
+static uint8_t wireless_transport;
+static bool wireless_transport_valid;
+static bool wireless_transport_dirty;
+static struct k_spinlock active_esb_bond_lock;
+static uint8_t active_wireless_transport;
+static bool active_wireless_transport_valid;
+static valve_settings_esb_bond_changed_cb_t esb_bond_changed_callback;
+
+struct feature_state_load_target
+{
+	void *value;
+	size_t value_size;
+	bool *valid;
+};
+
+static int load_feature_state_cb(const char *key, size_t len, settings_read_cb read_cb,
+                                 void *cb_arg, void *param)
+{
+	struct feature_state_load_target *target = param;
 	ssize_t read_len;
 
 	if(key != NULL && key[0] != '\0')
 	{
 		return 0;
 	}
-	if(len != sizeof(esb_bond))
+	if(len != target->value_size)
 	{
 		return -EINVAL;
 	}
-	read_len = read_cb(cb_arg, bond, sizeof(esb_bond));
-	if(read_len == sizeof(esb_bond))
+	read_len = read_cb(cb_arg, target->value, target->value_size);
+	if(read_len == (ssize_t)target->value_size)
 	{
-		esb_bond_valid = true;
+		*target->valid = true;
 	}
 	return 1;
 }
 
+static int esb_bond_slot(const char *path)
+{
+	for(size_t slot = 0; slot < ARRAY_SIZE(esb_bond_paths); ++slot)
+	{
+		if(strcmp(path, esb_bond_paths[slot]) == 0)
+		{
+			return (int)slot;
+		}
+	}
+	return -1;
+}
+
+static int esb_bond_slot_for_transport(uint8_t transport)
+{
+	switch(transport)
+	{
+		case VALVE_ESB_SLOT_0_TRANSPORT:
+			return 0;
+		case VALVE_ESB_SLOT_1_TRANSPORT:
+			return 1;
+		default:
+			return -1;
+	}
+}
+
+static bool esb_bond_material_valid(const uint8_t *bond)
+{
+	/* The original transport considers a slot stored only when both UUID words are nonzero. */
+	return sys_get_le32(&bond[0]) != 0U && sys_get_le32(&bond[4]) != 0U;
+}
+
+static bool esb_bond_available(size_t slot)
+{
+	const struct esb_bond *bond = &esb_bonds[slot].staged;
+
+	return bond->valid && esb_bond_material_valid(bond->data);
+}
+
+static bool active_esb_bond_available_locked(size_t slot)
+{
+	const struct esb_bond *bond = &esb_bonds[slot].active;
+
+	return bond->valid && esb_bond_material_valid(bond->data);
+}
+
+static void select_available_wireless_transport(void)
+{
+	int slot;
+
+	/* Original firmware uses zero for Bluetooth, which intentionally selects no ESB slot. */
+	if(wireless_transport_valid && wireless_transport == 0)
+	{
+		return;
+	}
+
+	slot = esb_bond_slot_for_transport(wireless_transport);
+	if(wireless_transport_valid && slot >= 0 && esb_bond_available(slot))
+	{
+		return;
+	}
+
+	if(wireless_transport_valid)
+	{
+		LOG_WRN("wireless transport %u does not select an available ESB bond", wireless_transport);
+	}
+	wireless_transport_valid = false;
+
+	for(size_t candidate = 0; candidate < ARRAY_SIZE(esb_bonds); ++candidate)
+	{
+		if(esb_bond_available(candidate))
+		{
+			wireless_transport =
+			    candidate == 0 ? VALVE_ESB_SLOT_0_TRANSPORT : VALVE_ESB_SLOT_1_TRANSPORT;
+			wireless_transport_valid = true;
+			return;
+		}
+	}
+}
+
+static void notify_esb_bond_changed(void)
+{
+	if(esb_bond_changed_callback != NULL)
+	{
+		esb_bond_changed_callback();
+	}
+}
+
 void valve_settings_load_feature_state(void)
 {
-	if(IS_ENABLED(CONFIG_SETTINGS))
+	struct feature_state_load_target transport_target = {
+		.value = &wireless_transport,
+		.value_size = sizeof(wireless_transport),
+		.valid = &wireless_transport_valid,
+	};
+	k_spinlock_key_t key;
+
+	if(!IS_ENABLED(CONFIG_SETTINGS))
 	{
-		settings_load_subtree_direct("esb/bond", load_esb_bond_cb, esb_bond);
+		return;
 	}
+
+	for(size_t slot = 0; slot < ARRAY_SIZE(esb_bonds); ++slot)
+	{
+		struct esb_bond_slot *bond_slot = &esb_bonds[slot];
+		struct feature_state_load_target target = {
+			.value = bond_slot->staged.data,
+			.value_size = sizeof(bond_slot->staged.data),
+			.valid = &bond_slot->staged.valid,
+		};
+
+		bond_slot->staged.valid = false;
+		(void)settings_load_subtree_direct(esb_bond_paths[slot], load_feature_state_cb, &target);
+		bond_slot->dirty = false;
+		if(bond_slot->staged.valid && !esb_bond_material_valid(bond_slot->staged.data))
+		{
+			LOG_WRN("ESB bond slot %u has no usable key material", (unsigned int)slot);
+		}
+	}
+
+	wireless_transport_valid = false;
+	(void)settings_load_subtree_direct(VALVE_WIRELESS_TRANSPORT_PATH, load_feature_state_cb,
+	                                   &transport_target);
+	select_available_wireless_transport();
+	wireless_transport_dirty = false;
+	key = k_spin_lock(&active_esb_bond_lock);
+	for(size_t slot = 0; slot < ARRAY_SIZE(esb_bonds); ++slot)
+	{
+		esb_bonds[slot].active = esb_bonds[slot].staged;
+	}
+	active_wireless_transport = wireless_transport;
+	active_wireless_transport_valid = wireless_transport_valid;
+	k_spin_unlock(&active_esb_bond_lock, key);
+	notify_esb_bond_changed();
+}
+
+bool valve_settings_copy_active_esb_bond(uint8_t *bond, size_t capacity, uint8_t *slot)
+{
+	k_spinlock_key_t key;
+	int active_slot;
+	bool available;
+
+	if(bond == NULL || capacity < VALVE_ESB_BOND_SIZE)
+	{
+		return false;
+	}
+
+	key = k_spin_lock(&active_esb_bond_lock);
+	if(!active_wireless_transport_valid)
+	{
+		k_spin_unlock(&active_esb_bond_lock, key);
+		return false;
+	}
+	active_slot = esb_bond_slot_for_transport(active_wireless_transport);
+	available = active_slot >= 0 && active_esb_bond_available_locked(active_slot);
+	if(available)
+	{
+		memcpy(bond, esb_bonds[active_slot].active.data, VALVE_ESB_BOND_SIZE);
+	}
+	k_spin_unlock(&active_esb_bond_lock, key);
+	if(!available)
+	{
+		return false;
+	}
+	if(slot != NULL)
+	{
+		*slot = (uint8_t)active_slot;
+	}
+	return true;
+}
+
+int valve_settings_register_esb_bond_changed_callback(valve_settings_esb_bond_changed_cb_t callback)
+{
+	if(callback == NULL)
+	{
+		return -EINVAL;
+	}
+	if(esb_bond_changed_callback != NULL && esb_bond_changed_callback != callback)
+	{
+		return -EALREADY;
+	}
+
+	esb_bond_changed_callback = callback;
+	callback();
+	return 0;
 }
 
 static bool calibration_path_side(const char *path, enum calibration_side *side)
@@ -178,15 +390,29 @@ bool valve_settings_read(const char *path, uint8_t *buf, size_t capacity, size_t
 	enum calibration_side side;
 	uint8_t setting_id;
 	int16_t setting_value;
+	int slot = esb_bond_slot(path);
 
-	if(strcmp(path, "esb/bond") == 0)
+	if(slot >= 0)
 	{
-		if(!esb_bond_valid || capacity < sizeof(esb_bond))
+		const struct esb_bond *bond = &esb_bonds[slot].staged;
+
+		if(!bond->valid || capacity < sizeof(bond->data))
 		{
 			return false;
 		}
-		memcpy(buf, esb_bond, sizeof(esb_bond));
-		*len = sizeof(esb_bond);
+		memcpy(buf, bond->data, sizeof(bond->data));
+		*len = sizeof(bond->data);
+		return true;
+	}
+
+	if(strcmp(path, VALVE_WIRELESS_TRANSPORT_PATH) == 0)
+	{
+		if(!wireless_transport_valid || capacity < sizeof(wireless_transport))
+		{
+			return false;
+		}
+		buf[0] = wireless_transport;
+		*len = sizeof(wireless_transport);
 		return true;
 	}
 
@@ -266,18 +492,46 @@ int valve_settings_stage(const char *path, const uint8_t *value, size_t len)
 {
 	enum calibration_side side;
 	uint8_t setting_id;
+	int slot = esb_bond_slot(path);
 	int err;
 
-	if(strcmp(path, "esb/bond") == 0)
+	if(slot >= 0)
 	{
-		if(len != sizeof(esb_bond))
+		struct esb_bond_slot *bond_slot = &esb_bonds[slot];
+
+		if(len != sizeof(bond_slot->staged.data))
 		{
 			return -EINVAL;
 		}
-		memcpy(esb_bond, value, sizeof(esb_bond));
-		esb_bond_valid = true;
-		esb_bond_dirty = true;
-		LOG_INF("staged ESB bond provisioned over feature settings");
+		memcpy(bond_slot->staged.data, value, sizeof(bond_slot->staged.data));
+		bond_slot->staged.valid = true;
+		bond_slot->dirty = true;
+		LOG_INF("staged ESB bond slot %d over feature settings", slot);
+		return 0;
+	}
+
+	if(strcmp(path, VALVE_WIRELESS_TRANSPORT_PATH) == 0)
+	{
+		k_spinlock_key_t key;
+		int selected_slot;
+		bool selected_bond_available;
+
+		if(len != sizeof(wireless_transport))
+		{
+			return -EINVAL;
+		}
+		selected_slot = esb_bond_slot_for_transport(value[0]);
+		key = k_spin_lock(&active_esb_bond_lock);
+		selected_bond_available =
+		    selected_slot >= 0 && active_esb_bond_available_locked(selected_slot);
+		k_spin_unlock(&active_esb_bond_lock, key);
+		if(value[0] != 0 && !selected_bond_available)
+		{
+			return -EINVAL;
+		}
+		wireless_transport = value[0];
+		wireless_transport_valid = true;
+		wireless_transport_dirty = true;
 		return 0;
 	}
 
@@ -351,23 +605,56 @@ int valve_settings_commit(const char *path)
 	uint8_t setting_id;
 	uint8_t encoded[sizeof(int16_t)];
 	int16_t setting_value;
+	int slot = esb_bond_slot(path);
 	int err;
 
-	if(strcmp(path, "esb/bond") == 0)
+	if(slot >= 0)
 	{
-		if(!esb_bond_dirty)
+		struct esb_bond_slot *bond_slot = &esb_bonds[slot];
+		k_spinlock_key_t key;
+
+		if(!bond_slot->dirty)
 		{
 			return 0;
 		}
-		err = settings_save_one("esb/bond", esb_bond, sizeof(esb_bond));
+		err = settings_save_one(esb_bond_paths[slot], bond_slot->staged.data,
+		                        sizeof(bond_slot->staged.data));
 		if(err)
 		{
-			LOG_ERR("failed to commit ESB bond: %d", err);
+			LOG_ERR("failed to commit ESB bond slot %d: %d", slot, err);
 			return err;
 		}
-		esb_bond_dirty = false;
-		LOG_INF("committed ESB bond %08x/%08x", sys_get_le32(&esb_bond[0]),
-		        sys_get_le32(&esb_bond[4]));
+		bond_slot->dirty = false;
+		key = k_spin_lock(&active_esb_bond_lock);
+		bond_slot->active = bond_slot->staged;
+		k_spin_unlock(&active_esb_bond_lock, key);
+		LOG_INF("committed ESB bond slot %d %08x/%08x", slot,
+		        sys_get_le32(&bond_slot->staged.data[0]), sys_get_le32(&bond_slot->staged.data[4]));
+		notify_esb_bond_changed();
+		return 0;
+	}
+
+	if(strcmp(path, VALVE_WIRELESS_TRANSPORT_PATH) == 0)
+	{
+		k_spinlock_key_t key;
+
+		if(!wireless_transport_dirty)
+		{
+			return 0;
+		}
+		err = settings_save_one(VALVE_WIRELESS_TRANSPORT_PATH, &wireless_transport,
+		                        sizeof(wireless_transport));
+		if(err)
+		{
+			LOG_ERR("failed to commit wireless transport: %d", err);
+			return err;
+		}
+		wireless_transport_dirty = false;
+		key = k_spin_lock(&active_esb_bond_lock);
+		active_wireless_transport = wireless_transport;
+		active_wireless_transport_valid = wireless_transport_valid;
+		k_spin_unlock(&active_esb_bond_lock, key);
+		notify_esb_bond_changed();
 		return 0;
 	}
 
@@ -403,4 +690,58 @@ int valve_settings_commit(const char *path)
 	}
 
 	return -ENOENT;
+}
+
+int valve_settings_save_esb_bond(uint8_t slot, const uint8_t *bond, size_t len, bool select)
+{
+	k_spinlock_key_t key;
+	uint8_t transport;
+	int err;
+
+	if(slot >= ARRAY_SIZE(esb_bonds) ||
+	   bond == NULL ||
+	   len != VALVE_ESB_BOND_SIZE ||
+	   (select && !esb_bond_material_valid(bond)))
+	{
+		return -EINVAL;
+	}
+
+	err = valve_settings_stage(esb_bond_paths[slot], bond, len);
+	if(err)
+	{
+		return err;
+	}
+	if(!IS_ENABLED(CONFIG_SETTINGS))
+	{
+		struct esb_bond_slot *bond_slot = &esb_bonds[slot];
+
+		bond_slot->dirty = false;
+		key = k_spin_lock(&active_esb_bond_lock);
+		bond_slot->active = bond_slot->staged;
+		if(select)
+		{
+			transport = slot == 0 ? VALVE_ESB_SLOT_0_TRANSPORT : VALVE_ESB_SLOT_1_TRANSPORT;
+			wireless_transport = transport;
+			wireless_transport_valid = true;
+			wireless_transport_dirty = false;
+			active_wireless_transport = transport;
+			active_wireless_transport_valid = true;
+		}
+		k_spin_unlock(&active_esb_bond_lock, key);
+		notify_esb_bond_changed();
+		return 0;
+	}
+	err = valve_settings_commit(esb_bond_paths[slot]);
+	if(err || !select)
+	{
+		return err;
+	}
+
+	transport = slot == 0 ? VALVE_ESB_SLOT_0_TRANSPORT : VALVE_ESB_SLOT_1_TRANSPORT;
+	err = valve_settings_stage(VALVE_WIRELESS_TRANSPORT_PATH, &transport, sizeof(transport));
+	if(err)
+	{
+		return err;
+	}
+	return valve_settings_commit(VALVE_WIRELESS_TRANSPORT_PATH);
 }

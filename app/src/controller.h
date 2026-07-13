@@ -157,7 +157,8 @@ uint32_t transport_esb_backend_crc_ok_events(void);
 uint32_t transport_esb_backend_crc_bad_events(void);
 uint32_t transport_esb_backend_rx_dropped_events(void);
 bool transport_esb_bond_loaded(void);
-int transport_esb_provision_bond(uint32_t proteus_uuid, uint32_t ibex_uuid, const char *serial);
+int transport_esb_provision_bond(uint8_t slot, uint32_t proteus_uuid, uint32_t ibex_uuid,
+                                 const char *serial);
 int transport_esb_get_debug(struct valve_esb_backend_debug *debug);
 
 void radio_personality_init(void);

@@ -13,6 +13,7 @@
 #include "lizard.h"
 #include "power.h"
 #include "puck_interface.h"
+#include "valve_settings.h"
 #include "watchdog.h"
 
 #if CONFIG_IBEX_RGBW_LED
@@ -93,6 +94,7 @@ int main(void)
 		}
 	}
 	radio_personality_init();
+	valve_settings_load_feature_state();
 	ibex_settings_registry_init();
 	err = lizard_init();
 	if(err)
