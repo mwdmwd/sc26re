@@ -538,6 +538,11 @@ static int16_t normalized_to_axis(float normalized)
 	return CLAMP((int32_t)((normalized - 0.5f) * 65532.0f), INT16_MIN, INT16_MAX);
 }
 
+static int16_t invert_axis(int16_t axis)
+{
+	return axis == INT16_MIN ? INT16_MAX : -axis;
+}
+
 static uint16_t scale_pad_pressure(bool right, float normalized)
 {
 	float low;
@@ -645,7 +650,7 @@ static void decode_pad(struct olympus_pad_state *state, const int16_t *x_samples
 	}
 
 	*x = normalized_to_axis(normalized_x);
-	*y = -normalized_to_axis(normalized_y);
+	*y = invert_axis(normalized_to_axis(normalized_y));
 
 	if(!state->click_filter_initialized)
 	{
