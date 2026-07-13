@@ -10,9 +10,11 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/settings/settings.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
 
 #include "controller.h"
+#include "haptics.h"
 #include "sdl/controller_structs.h"
 #include "triton_state_report.h"
 #include "valve_feature.h"
@@ -31,8 +33,6 @@ LOG_MODULE_REGISTER(transport_ble);
 #define VALVE_PRIMARY_INPUT_ATTR 12
 #define VALVE_BATTERY_INPUT_ATTR 16
 #define VALVE_BLE_STATE_INPUT_ATTR 24
-#define VALVE_HAPTIC_PCM_STEREO_REPORT 0x88
-#define VALVE_HAPTIC_PCM_STEREO_SAMPLES 31
 
 BUILD_ASSERT(CONFIG_BT_ID_MAX >= VALVE_IDENTITY_COUNT,
              "CONFIG_BT_ID_MAX must be at least as large as VALVE_IDENTITY_COUNT");
@@ -80,6 +80,7 @@ static bool ble_state_input_notify_enabled;
 static bool battery_input_notify_enabled;
 static bool ble_started;
 static struct bt_conn *active_conn;
+static atomic_t active_conn_present;
 static bool identity_has_bond[CONFIG_BT_ID_MAX];
 static uint32_t input_no_subscription_logs;
 static uint32_t input_notify_error_logs;
@@ -139,18 +140,11 @@ static ssize_t read_report_ref(struct bt_conn *conn, const struct bt_gatt_attr *
 
 static void handle_output_report(const struct valve_report *report)
 {
-	switch(report->id)
-	{
-		case VALVE_HAPTIC_PCM_STEREO_REPORT:
-			if(report->data[0] == 0 || report->data[0] > VALVE_HAPTIC_PCM_STEREO_SAMPLES)
-			{
-				LOG_WRN("invalid stereo PCM length %u", report->data[0]);
-				return;
-			}
+	int err = haptics_handle_output_report(report->id, report->data, report->size);
 
-			break;
-		default:
-			break;
+	if(err && err != -ENOTSUP && err != -ENODEV && err != -EBUSY)
+	{
+		LOG_WRN("BLE output report 0x%02x rejected: %d", report->id, err);
 	}
 }
 
@@ -488,6 +482,7 @@ static void ble_connected_cb(struct bt_conn *conn, uint8_t err)
 		bt_conn_unref(active_conn);
 	}
 	active_conn = bt_conn_ref(conn);
+	atomic_set(&active_conn_present, 1);
 
 	if(bt_conn_get_info(conn, &info) == 0)
 	{
@@ -556,12 +551,18 @@ static void ble_disconnected_cb(struct bt_conn *conn, uint8_t reason)
 	LOG_INF("disconnected (reason 0x%02x)", reason);
 	if(active_conn == conn)
 	{
+		atomic_clear(&active_conn_present);
 		bt_conn_unref(active_conn);
 		active_conn = NULL;
 	}
 	primary_input_notify_enabled = false;
 	ble_state_input_notify_enabled = false;
 	battery_input_notify_enabled = false;
+}
+
+bool transport_ble_connected(void)
+{
+	return atomic_get(&active_conn_present) != 0;
 }
 
 BT_CONN_CB_DEFINE(ble_conn_cbs) = {

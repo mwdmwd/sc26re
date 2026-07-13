@@ -5,10 +5,12 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/settings/settings.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
 
 #include "controller.h"
 #include "esb_backend.h"
+#include "haptics.h"
 #include "sdl/controller_constants.h"
 #include "sdl/controller_structs.h"
 #include "triton_state_report.h"
@@ -29,7 +31,7 @@ enum
 	ESB_CONTROLLER_STATUS = 0xF3,
 	ESB_APP_REPORT_WRITE = 0x01,
 	ESB_APP_REPORT_READ = 0x03,
-	ESB_APP_LEGACY_SET = 0x05,
+	ESB_APP_HAPTICS = 0x05,
 	ESB_TLV_WRITE_RESULT = 0x02,
 	ESB_TLV_FEATURE_RESPONSE = 0x04,
 	ESB_REPORT_TLV = 0x06,
@@ -85,6 +87,7 @@ static uint8_t channel_map_index;
 static uint8_t pending_map_channel = ESB_CHANNEL_UNUSED;
 static int64_t last_host_rx_ms;
 static bool session_connected;
+static atomic_t session_connected_public;
 static bool esb_started;
 static uint32_t host_frames_received;
 static uint32_t channel_maps_received;
@@ -332,6 +335,7 @@ static void session_work_handler(struct k_work *work)
 	channel_map_index = 0;
 	last_host_rx_ms = k_uptime_get();
 	session_connected = true;
+	atomic_set(&session_connected_public, 1);
 	session_pending = false;
 	queue_latest_input(ESB_REPORT_45_ID);
 	(void)valve_esb_backend_start_rx();
@@ -618,7 +622,6 @@ static void handle_host_poll(const struct valve_esb_payload *payload)
 					requested_report_id = body[0];
 					break;
 				}
-
 				deferred_feature_response_valid = false;
 				n = valve_feature_respond(VALVE_FEATURE_LINK_ESB, body, body_len,
 				                          esb_feature_response, sizeof(esb_feature_response));
@@ -660,14 +663,9 @@ static void handle_host_poll(const struct valve_esb_payload *payload)
 				}
 				break;
 			}
-			case ESB_APP_LEGACY_SET:
+			case ESB_APP_HAPTICS:
 			{
-				ssize_t n;
-
-				deferred_feature_response_valid = false;
-				n = valve_feature_respond(VALVE_FEATURE_LINK_ESB, body, body_len,
-				                          esb_feature_response, sizeof(esb_feature_response));
-				stage_write_result(n >= 0 ? 0 : (int32_t)n);
+				(void)haptics_handle_output_report(0, body, body_len);
 				break;
 			}
 			default:
@@ -849,6 +847,7 @@ void transport_esb_deactivate(void)
 	stop_and_flush();
 	valve_esb_backend_disable();
 	session_connected = false;
+	atomic_clear(&session_connected_public);
 	session_pending = false;
 	latest_input_valid = false;
 	latest_battery_valid = false;
@@ -930,7 +929,7 @@ int transport_esb_send_battery_status(const struct controller_battery_report *re
 
 bool transport_esb_connected(void)
 {
-	return session_connected;
+	return atomic_get(&session_connected_public) != 0;
 }
 
 uint8_t transport_esb_channel(void)

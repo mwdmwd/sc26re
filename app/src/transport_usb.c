@@ -13,6 +13,7 @@
 #include <hal/nrf_power.h>
 
 #include "controller.h"
+#include "haptics.h"
 #include "power.h"
 #include "sdl/controller_structs.h"
 #include "triton_state_report.h"
@@ -34,6 +35,7 @@ LOG_MODULE_REGISTER(transport_usb);
 static const struct device *hid_dev;
 static uint8_t input_sequence;
 static uint8_t feature_response[VALVE_FEATURE_REPORT_SIZE];
+static uint8_t output_report[VALVE_FEATURE_REPORT_SIZE];
 static uint8_t input_report[1 + VALVE_INPUT_42_SIZE];
 static uint8_t battery_report[1 + VALVE_INPUT_43_SIZE];
 static atomic_t input_busy;
@@ -169,6 +171,43 @@ static void prepare_feature_response(const uint8_t *request, size_t len)
 	feature_response[0] = VALVE_FEATURE_REPORT_ID;
 }
 
+static void handle_output_report(uint8_t report_id, const uint8_t *data, size_t len)
+{
+	int err = haptics_handle_output_report(report_id, data, len);
+
+	if(err && err != -ENOTSUP && err != -ENODEV && err != -EBUSY)
+	{
+		LOG_WRN("USB output report 0x%02x rejected: %d", report_id, err);
+	}
+}
+
+static size_t usb_output_report_bytes(uint8_t report_id)
+{
+	switch(report_id)
+	{
+		case ID_OUT_REPORT_HAPTIC_RUMBLE:
+			return HID_RUMBLE_OUTPUT_REPORT_BYTES;
+		case ID_OUT_REPORT_HAPTIC_PULSE:
+			return HID_HAPTIC_PULSE_OUTPUT_REPORT_BYTES;
+		case ID_OUT_REPORT_HAPTIC_COMMAND:
+			return HID_HAPTIC_COMMAND_REPORT_BYTES;
+		case ID_OUT_REPORT_HAPTIC_LFO_TONE:
+			return HID_HAPTIC_LFO_TONE_REPORT_BYTES;
+		case ID_OUT_REPORT_HAPTIC_LOG_SWEEP:
+			return HID_HAPTIC_LOG_SWEEP_REPORT_BYTES;
+		case ID_OUT_REPORT_HAPTIC_SCRIPT:
+			return HID_HAPTIC_SCRIPT_REPORT_BYTES;
+		case 0x86:
+			return 4U;
+		case 0x87:
+		case 0x88:
+		case 0x89:
+			return VALVE_FEATURE_REPORT_SIZE;
+		default:
+			return 0U;
+	}
+}
+
 static int usb_get_report(const struct device *dev, struct usb_setup_packet *setup, int32_t *len,
                           uint8_t **data)
 {
@@ -204,9 +243,19 @@ static int usb_set_report(const struct device *dev, struct usb_setup_packet *set
 		return 0;
 	}
 
-	/* Accept output reports for host compatibility; haptics follow later. */
 	if(type == HID_REPORT_TYPE_OUTPUT)
 	{
+		size_t report_len = *len > 0 ? (size_t)*len : 0;
+		size_t full_report_len = usb_output_report_bytes(id);
+
+		if(full_report_len != 0U && report_len == full_report_len && (*data)[0] == id)
+		{
+			handle_output_report(0, *data, report_len);
+		}
+		else
+		{
+			handle_output_report(id, *data, report_len);
+		}
 		return 0;
 	}
 	return -ENOTSUP;
@@ -218,10 +267,27 @@ static void usb_input_ready(const struct device *dev)
 	atomic_clear(&input_busy);
 }
 
+static void usb_output_ready(const struct device *dev)
+{
+	uint32_t bytes_read = 0;
+	int err = hid_int_ep_read(dev, output_report, sizeof(output_report), &bytes_read);
+
+	if(err)
+	{
+		LOG_WRN("USB interrupt output read failed: %d", err);
+		return;
+	}
+	if(bytes_read != 0)
+	{
+		handle_output_report(0, output_report, bytes_read);
+	}
+}
+
 static const struct hid_ops hid_ops = {
 	.get_report = usb_get_report,
 	.set_report = usb_set_report,
 	.int_in_ready = usb_input_ready,
+	.int_out_ready = usb_output_ready,
 };
 
 int transport_usb_init(void)

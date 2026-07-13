@@ -31,6 +31,11 @@ __weak int transport_ble_clear_bonds(uint8_t id)
 	return -ENOTSUP;
 }
 
+__weak bool transport_ble_connected(void)
+{
+	return false;
+}
+
 __weak void transport_esb_deactivate(void)
 {
 }

@@ -125,6 +125,7 @@ int transport_ble_send(const struct controller_report *report);
 int transport_ble_send_battery_status(const struct controller_battery_report *report);
 void transport_ble_deactivate(void);
 int transport_ble_clear_bonds(uint8_t id);
+bool transport_ble_connected(void);
 
 bool transport_usb_attached(void);
 bool transport_usb_configured(void);
