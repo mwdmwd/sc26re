@@ -177,7 +177,6 @@ int main(void)
 		struct controller_report current;
 
 		hardware_read_report(&current);
-		lizard_update(&current);
 		if((current.buttons & BIT(CONTROLLER_BUTTON_STEAM)) != 0U)
 		{
 			if(steam_button_since == 0)
@@ -197,8 +196,11 @@ int main(void)
 
 		bool changed = first || memcmp(&current, &previous, sizeof(current)) != 0;
 		bool refresh_due = k_uptime_get() - last_input_sent >= INPUT_REFRESH_MS;
+		/* OFW uses each full-state ESB report as the container boundary for lizard
+		 * reports produced by the preceding input sample. */
+		bool esb_state_boundary = transport_esb_connected();
 
-		if(changed || refresh_due)
+		if(changed || refresh_due || esb_state_boundary)
 		{
 			if(changed && (current.buttons & ~previous.buttons) != 0U)
 			{
@@ -217,6 +219,8 @@ int main(void)
 			previous = current;
 			first = false;
 		}
+		/* OFW sends the full state before waking lizard input processing. */
+		lizard_update(&current);
 
 		hardware_wait_for_change();
 		watchdog_feed();

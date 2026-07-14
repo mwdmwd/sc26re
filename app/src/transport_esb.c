@@ -41,8 +41,6 @@ enum
 	ESB_REPORT_42_SIZE = 54,
 	ESB_REPORT_43_ID = ID_TRITON_BATTERY_STATUS,
 	ESB_REPORT_43_SIZE = 15,
-	ESB_REPORT_45_ID = ID_TRITON_CONTROLLER_STATE_BLE,
-	ESB_REPORT_45_SIZE = 46,
 	ESB_REPORT_40_ID = 0x40,
 	ESB_REPORT_40_BODY_SIZE = 5,
 	ESB_REPORT_41_ID = 0x41,
@@ -54,23 +52,23 @@ enum
 	ESB_CHANNEL_SCAN_INTERVAL_MS = 426,
 	ESB_LEGACY_FEATURE_FALLBACK_MS = 50,
 	ESB_BOND_CHANGE_DEFER_MS = 1,
-	ESB_LIZARD_INPUT_QUEUE_DEPTH = 32,
-	ESB_LIZARD_INPUT_MAX_SIZE = 8,
+	/* OFW's ibex_esb_input_report_msgq has five pointer entries. Keeping the
+	 * same bound also keeps one F1 below the puck's eight-buffer HID IN pool. */
+	ESB_INPUT_REPORT_QUEUE_DEPTH = 5,
+	ESB_INPUT_REPORT_MAX_BODY_SIZE = ESB_REPORT_43_SIZE - 1,
 };
 
-struct esb_lizard_input_entry
+struct esb_input_report_entry
 {
 	uint8_t id;
 	uint8_t len;
-	uint8_t data[ESB_LIZARD_INPUT_MAX_SIZE];
+	uint8_t data[ESB_INPUT_REPORT_MAX_BODY_SIZE];
 };
 
 static const uint8_t discovery_base[] = { 'i', 'b', 'e', 'x' };
 static const uint8_t discovery_prefix[] = { 0x10 };
 static struct valve_esb_payload latest_input_42;
-static struct valve_esb_payload latest_battery_43;
-static struct valve_esb_payload latest_input_45;
-static struct esb_lizard_input_entry lizard_input_queue[ESB_LIZARD_INPUT_QUEUE_DEPTH];
+static struct esb_input_report_entry input_report_queue[ESB_INPUT_REPORT_QUEUE_DEPTH];
 static struct valve_esb_payload rx_payload;
 static struct k_spinlock latest_input_lock;
 static uint8_t pending_feature_response[ESB_FEATURE_REPORT_SIZE];
@@ -85,10 +83,10 @@ static uint32_t pending_write_generation;
 static uint32_t last_feature_generation;
 static uint32_t legacy_feature_fallback_generation;
 static uint8_t report_sequence;
-static uint8_t lizard_input_queue_head;
-static uint8_t lizard_input_queue_count;
+static uint8_t input_report_queue_head;
+static uint8_t input_report_queue_count;
+static uint32_t input_report_queue_generation;
 static bool latest_input_valid;
-static bool latest_battery_valid;
 static bool session_pending;
 static bool legacy_feature_fallback_pending;
 static uint8_t pending_channel;
@@ -127,7 +125,7 @@ enum
 static uint8_t rejected_host_frame_logs_remaining = 8;
 static uint8_t unknown_host_opcode_logs_remaining = 8;
 
-static void queue_latest_input(uint8_t requested_report_id);
+static void queue_latest_input(void);
 static void feature_response_fallback_work_handler(struct k_work *work);
 static void bond_change_work_handler(struct k_work *work);
 
@@ -239,38 +237,19 @@ static void channel_map_work_handler(struct k_work *work)
 
 K_WORK_DEFINE(channel_map_work, channel_map_work_handler);
 
-static bool is_esb_input_report_id(uint8_t report_id)
-{
-	switch(report_id)
-	{
-		case ESB_REPORT_42_ID:
-		case ESB_REPORT_43_ID:
-		case ESB_REPORT_45_ID:
-		case ESB_REPORT_40_ID:
-		case ESB_REPORT_41_ID:
-			return true;
-		default:
-			return false;
-	}
-}
-
-static void queue_latest_input(uint8_t requested_report_id)
+static void queue_latest_input(void)
 {
 	struct valve_esb_payload payload;
 	k_spinlock_key_t key;
 	size_t feature_len;
 	uint32_t feature_generation;
 	uint32_t write_generation;
+	uint32_t queue_generation;
 	bool write_valid;
 	bool write_included = false;
 	bool report_included = false;
-	uint8_t lizard_reports_included = 0;
+	uint8_t queued_reports_included = 0;
 	int err;
-
-	if(requested_report_id == 0)
-	{
-		requested_report_id = ESB_REPORT_45_ID;
-	}
 
 	key = k_spin_lock(&latest_input_lock);
 	payload = (struct valve_esb_payload){
@@ -281,6 +260,7 @@ static void queue_latest_input(uint8_t requested_report_id)
 	feature_len = pending_feature_response_len;
 	feature_generation = pending_feature_generation;
 	write_generation = pending_write_generation;
+	queue_generation = input_report_queue_generation;
 	write_valid = pending_write_result_valid;
 	if(feature_len != 0 && payload.length + feature_len + 2 <= ESB_MAX_PAYLOAD_SIZE)
 	{
@@ -299,35 +279,16 @@ static void queue_latest_input(uint8_t requested_report_id)
 		payload.length += sizeof(pending_write_result);
 		write_included = true;
 	}
-	if(requested_report_id == ESB_REPORT_42_ID &&
-	   latest_input_valid &&
-	   payload.length + latest_input_42.length - 1 <= ESB_MAX_PAYLOAD_SIZE)
+	if(latest_input_valid && payload.length + latest_input_42.length - 1 <= ESB_MAX_PAYLOAD_SIZE)
 	{
 		memcpy(&payload.data[payload.length], &latest_input_42.data[1], latest_input_42.length - 1);
 		payload.length += latest_input_42.length - 1;
 		report_included = true;
 	}
-	if(requested_report_id == ESB_REPORT_45_ID &&
-	   latest_input_valid &&
-	   payload.length + latest_input_45.length - 1 <= ESB_MAX_PAYLOAD_SIZE)
+	for(uint8_t i = 0; i < input_report_queue_count; ++i)
 	{
-		memcpy(&payload.data[payload.length], &latest_input_45.data[1], latest_input_45.length - 1);
-		payload.length += latest_input_45.length - 1;
-		report_included = true;
-	}
-	if(requested_report_id == ESB_REPORT_43_ID &&
-	   latest_battery_valid &&
-	   payload.length + latest_battery_43.length - 1 <= ESB_MAX_PAYLOAD_SIZE)
-	{
-		memcpy(&payload.data[payload.length], &latest_battery_43.data[1],
-		       latest_battery_43.length - 1);
-		payload.length += latest_battery_43.length - 1;
-		report_included = true;
-	}
-	for(uint8_t i = 0; i < lizard_input_queue_count; ++i)
-	{
-		const uint8_t queue_index = (lizard_input_queue_head + i) % ARRAY_SIZE(lizard_input_queue);
-		const struct esb_lizard_input_entry *entry = &lizard_input_queue[queue_index];
+		const uint8_t queue_index = (input_report_queue_head + i) % ARRAY_SIZE(input_report_queue);
+		const struct esb_input_report_entry *entry = &input_report_queue[queue_index];
 		const uint8_t report_size = entry->len + 1U;
 
 		if(payload.length + report_size + 2U > ESB_MAX_PAYLOAD_SIZE)
@@ -339,10 +300,10 @@ static void queue_latest_input(uint8_t requested_report_id)
 		payload.data[payload.length++] = entry->id;
 		memcpy(&payload.data[payload.length], entry->data, entry->len);
 		payload.length += entry->len;
-		lizard_reports_included++;
+		queued_reports_included++;
 	}
 	k_spin_unlock(&latest_input_lock, key);
-	if(feature_len == 0 && !write_included && !report_included && lizard_reports_included == 0)
+	if(feature_len == 0 && !write_included && !report_included && queued_reports_included == 0)
 	{
 		return;
 	}
@@ -362,11 +323,12 @@ static void queue_latest_input(uint8_t requested_report_id)
 	{
 		pending_write_result_valid = false;
 	}
-	if(lizard_reports_included != 0)
+	if(queued_reports_included != 0 && queue_generation == input_report_queue_generation)
 	{
-		lizard_input_queue_head =
-		    (lizard_input_queue_head + lizard_reports_included) % ARRAY_SIZE(lizard_input_queue);
-		lizard_input_queue_count -= lizard_reports_included;
+		input_report_queue_head =
+		    (input_report_queue_head + queued_reports_included) % ARRAY_SIZE(input_report_queue);
+		input_report_queue_count -= queued_reports_included;
+		input_report_queue_generation++;
 	}
 	k_spin_unlock(&latest_input_lock, key);
 }
@@ -395,11 +357,12 @@ static void session_work_handler(struct k_work *work)
 	channel_map_index = 0;
 	last_host_rx_ms = k_uptime_get();
 	session_connected = true;
-	atomic_set(&session_connected_public, 1);
-	lizard_transport_reset();
 	session_pending = false;
-	queue_latest_input(ESB_REPORT_45_ID);
 	(void)valve_esb_backend_start_rx();
+	atomic_set(&session_connected_public, 1);
+	/* OFW activates input only after private RX is running. The reset wakes the
+	 * input loop, whose first fresh full-state sample builds the first F1. */
+	lizard_transport_reset();
 
 	LOG_INF("ESB session: channel %u, base %02x%02x%02x%02x, prefix %02x", pending_channel,
 	        pending_base[0], pending_base[1], pending_base[2], pending_base[3], pending_prefix);
@@ -490,9 +453,9 @@ static void bond_change_work_handler(struct k_work *work)
 	pending_write_result_valid = false;
 	legacy_feature_fallback_pending = false;
 	latest_input_valid = false;
-	latest_battery_valid = false;
-	lizard_input_queue_head = 0;
-	lizard_input_queue_count = 0;
+	input_report_queue_head = 0;
+	input_report_queue_count = 0;
+	input_report_queue_generation++;
 	k_spin_unlock(&latest_input_lock, key);
 
 	configure_address(discovery_base, discovery_prefix);
@@ -681,7 +644,6 @@ static void feature_response_fallback_work_handler(struct k_work *work)
 
 	LOG_DBG("legacy E3 feature fallback for 0x%02x", response[0]);
 	stage_feature_response(response, response_len);
-	queue_latest_input(ESB_REPORT_45_ID);
 }
 
 static void stage_write_result(int32_t result)
@@ -724,7 +686,6 @@ static void handle_host_poll(const struct valve_esb_payload *payload)
 {
 	static uint8_t diagnostic_logs_remaining = 20;
 	size_t index = 1;
-	uint8_t requested_report_id = 0;
 	uint8_t deferred_feature_response[ESB_FEATURE_REPORT_SIZE];
 	size_t deferred_feature_response_len = 0;
 	bool deferred_feature_response_valid = false;
@@ -735,7 +696,7 @@ static void handle_host_poll(const struct valve_esb_payload *payload)
 	                                       payload->data[2] == ESB_APP_REPORT_WRITE &&
 	                                       payload->data[3] == ID_TRITON_CONTROLLER_STATE_BLE))
 	{
-		LOG_HEXDUMP_INF(payload->data, payload->length, "non-input ESB E3");
+		LOG_HEXDUMP_INF(payload->data, payload->length, "unusual ESB E3");
 		diagnostic_logs_remaining--;
 	}
 
@@ -757,14 +718,14 @@ static void handle_host_poll(const struct valve_esb_payload *payload)
 			{
 				ssize_t n;
 
-				if(body_len > 0 && is_esb_input_report_id(body[0]))
-				{
-					requested_report_id = body[0];
-					break;
-				}
 				deferred_feature_response_valid = false;
 				n = valve_feature_respond(VALVE_FEATURE_LINK_ESB, body, body_len,
 				                          esb_feature_response, sizeof(esb_feature_response));
+				if(n == -ENOTSUP)
+				{
+					/* OFW's HID write dispatcher reports a missing feature handler as EINVAL. */
+					n = -EINVAL;
+				}
 
 				if(n >= 0)
 				{
@@ -819,7 +780,6 @@ static void handle_host_poll(const struct valve_esb_payload *payload)
 	{
 		stage_feature_response(deferred_feature_response, deferred_feature_response_len);
 	}
-	queue_latest_input(requested_report_id);
 }
 
 static void handle_host_channel_map(const struct valve_esb_payload *payload)
@@ -991,11 +951,11 @@ void transport_esb_deactivate(void)
 	session_connected = false;
 	atomic_clear(&session_connected_public);
 	session_pending = false;
-	latest_input_valid = false;
-	latest_battery_valid = false;
 	key = k_spin_lock(&latest_input_lock);
-	lizard_input_queue_head = 0;
-	lizard_input_queue_count = 0;
+	latest_input_valid = false;
+	input_report_queue_head = 0;
+	input_report_queue_count = 0;
+	input_report_queue_generation++;
 	k_spin_unlock(&latest_input_lock, key);
 	atomic_clear(&bond_change_pending);
 }
@@ -1023,68 +983,97 @@ static void build_input_payload(struct valve_esb_payload *payload, uint8_t repor
 int transport_esb_send(const struct controller_report *report)
 {
 	struct valve_esb_payload input_42;
-	struct valve_esb_payload input_45;
 	k_spinlock_key_t key;
-	uint8_t sequence = report_sequence++;
+	uint8_t sequence;
 
-	build_input_payload(&input_42, ESB_REPORT_42_ID, ESB_REPORT_42_SIZE, sequence, report);
-	build_input_payload(&input_45, ESB_REPORT_45_ID, ESB_REPORT_45_SIZE, sequence, report);
+	if(atomic_get(&session_connected_public) == 0 || atomic_get(&bond_change_pending) != 0)
+	{
+		return -ENOTCONN;
+	}
 
 	key = k_spin_lock(&latest_input_lock);
+	if(atomic_get(&session_connected_public) == 0 || atomic_get(&bond_change_pending) != 0)
+	{
+		k_spin_unlock(&latest_input_lock, key);
+		return -ENOTCONN;
+	}
+	sequence = report_sequence++;
+	build_input_payload(&input_42, ESB_REPORT_42_ID, ESB_REPORT_42_SIZE, sequence, report);
 	latest_input_42 = input_42;
-	latest_input_45 = input_45;
 	latest_input_valid = true;
 	k_spin_unlock(&latest_input_lock, key);
+	/* As in OFW, a full-state report builds one F1 and then drains reports
+	 * queued by lizard processing of the preceding input sample. */
+	queue_latest_input();
 
+	return 0;
+}
+
+static int queue_input_report(uint8_t report_id, const uint8_t *data, size_t len)
+{
+	struct esb_input_report_entry *entry;
+	k_spinlock_key_t key;
+	uint8_t tail;
+
+	if(atomic_get(&session_connected_public) == 0 || atomic_get(&bond_change_pending) != 0)
+	{
+		return -ENOTCONN;
+	}
+	if(data == NULL || len > ESB_INPUT_REPORT_MAX_BODY_SIZE)
+	{
+		return -EINVAL;
+	}
+
+	key = k_spin_lock(&latest_input_lock);
+	/* Teardown clears the public flag before draining under this lock. Recheck
+	 * here so a producer cannot append a stale report after that drain. */
+	if(atomic_get(&session_connected_public) == 0 || atomic_get(&bond_change_pending) != 0)
+	{
+		k_spin_unlock(&latest_input_lock, key);
+		return -ENOTCONN;
+	}
+	if(input_report_queue_count == ARRAY_SIZE(input_report_queue))
+	{
+		/* This producer tracks absolute keyboard and button state, so it must
+		 * retry any report that was not retained. */
+		k_spin_unlock(&latest_input_lock, key);
+		return -EAGAIN;
+	}
+	tail = (input_report_queue_head + input_report_queue_count) % ARRAY_SIZE(input_report_queue);
+	entry = &input_report_queue[tail];
+	entry->id = report_id;
+	entry->len = len;
+	memcpy(entry->data, data, len);
+	input_report_queue_count++;
+	k_spin_unlock(&latest_input_lock, key);
 	return 0;
 }
 
 int transport_esb_send_battery_status(const struct controller_battery_report *report)
 {
-	struct valve_esb_payload battery_43 = {
-		.length = 3 + ESB_REPORT_43_SIZE,
-		.pipe = 0,
-	};
-	uint8_t *input_report = &battery_43.data[3];
-	k_spinlock_key_t key;
+	uint8_t body[ESB_REPORT_43_SIZE - 1];
 
 	if(!report->valid)
 	{
 		return -EINVAL;
 	}
 
-	battery_43.data[0] = ESB_CONTROLLER_INPUT;
-	battery_43.data[1] = ESB_REPORT_43_SIZE;
-	battery_43.data[2] = ESB_REPORT_TLV;
-	input_report[0] = ESB_REPORT_43_ID;
-	input_report[1] = report->charge_state;
-	input_report[2] = report->level_percent;
-	sys_put_le16(report->battery_mv, &input_report[3]);
-	sys_put_le16(report->system_mv, &input_report[5]);
-	sys_put_le16(report->input_mv, &input_report[7]);
-	sys_put_le16(report->current_ma, &input_report[9]);
-	sys_put_le16(report->input_current_ma, &input_report[11]);
-	sys_put_le16(report->temperature_c, &input_report[13]);
+	body[0] = report->charge_state;
+	body[1] = report->level_percent;
+	sys_put_le16(report->battery_mv, &body[2]);
+	sys_put_le16(report->system_mv, &body[4]);
+	sys_put_le16(report->input_mv, &body[6]);
+	sys_put_le16(report->current_ma, &body[8]);
+	sys_put_le16(report->input_current_ma, &body[10]);
+	sys_put_le16(report->temperature_c, &body[12]);
 
-	key = k_spin_lock(&latest_input_lock);
-	latest_battery_43 = battery_43;
-	latest_battery_valid = true;
-	k_spin_unlock(&latest_input_lock, key);
-
-	return 0;
+	return queue_input_report(ESB_REPORT_43_ID, body, sizeof(body));
 }
 
 int transport_esb_send_input_report(uint8_t report_id, const uint8_t *data, size_t len)
 {
-	struct esb_lizard_input_entry *entry;
-	k_spinlock_key_t key;
 	uint8_t expected_len;
-	uint8_t tail;
 
-	if(atomic_get(&session_connected_public) == 0)
-	{
-		return -ENOTCONN;
-	}
 	if(report_id == ESB_REPORT_40_ID)
 	{
 		expected_len = ESB_REPORT_40_BODY_SIZE;
@@ -1102,20 +1091,7 @@ int transport_esb_send_input_report(uint8_t report_id, const uint8_t *data, size
 		return -EINVAL;
 	}
 
-	key = k_spin_lock(&latest_input_lock);
-	if(lizard_input_queue_count == ARRAY_SIZE(lizard_input_queue))
-	{
-		k_spin_unlock(&latest_input_lock, key);
-		return -ENOMEM;
-	}
-	tail = (lizard_input_queue_head + lizard_input_queue_count) % ARRAY_SIZE(lizard_input_queue);
-	entry = &lizard_input_queue[tail];
-	entry->id = report_id;
-	entry->len = len;
-	memcpy(entry->data, data, len);
-	lizard_input_queue_count++;
-	k_spin_unlock(&latest_input_lock, key);
-	return 0;
+	return queue_input_report(report_id, data, len);
 }
 
 bool transport_esb_connected(void)
