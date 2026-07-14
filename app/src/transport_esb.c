@@ -48,8 +48,10 @@ enum
 	ESB_MAX_PAYLOAD_SIZE = 128,
 	ESB_CHANNEL_MAP_SIZE = 4,
 	ESB_CHANNEL_UNUSED = 0xff,
-	ESB_CHANNEL_SCAN_INITIAL_MS = 328,
-	ESB_CHANNEL_SCAN_INTERVAL_MS = 426,
+	/* OFW stores these as 32.768 kHz ticks: */
+	ESB_CHANNEL_HOLD_MS = 10,          /* 328 ticks */
+	ESB_CHANNEL_SCAN_INTERVAL_MS = 13, /* 426 ticks */
+	ESB_SESSION_TIMEOUT_MS = 500,      /* 16384 ticks */
 	ESB_LEGACY_FEATURE_FALLBACK_MS = 50,
 	ESB_BOND_CHANGE_DEFER_MS = 1,
 	/* OFW's ibex_esb_input_report_msgq has five pointer entries. Keeping the
@@ -99,9 +101,12 @@ static uint8_t channel_map[ESB_CHANNEL_MAP_SIZE] = {
 	ESB_CHANNEL_UNUSED,
 	ESB_CHANNEL_UNUSED,
 };
+static struct k_spinlock channel_map_lock;
 static uint8_t channel_map_index;
 static uint8_t pending_map_channel = ESB_CHANNEL_UNUSED;
-static int64_t last_host_rx_ms;
+static uint32_t pending_map_generation;
+static atomic_t last_host_rx_ms;
+static atomic_t session_generation;
 static bool session_connected;
 static atomic_t session_connected_public;
 static atomic_t bond_change_pending;
@@ -128,9 +133,31 @@ static uint8_t unknown_host_opcode_logs_remaining = 8;
 static void queue_latest_input(void);
 static void feature_response_fallback_work_handler(struct k_work *work);
 static void bond_change_work_handler(struct k_work *work);
+static void channel_scan_work_handler(struct k_work *work);
 
 K_WORK_DELAYABLE_DEFINE(feature_response_fallback_work, feature_response_fallback_work_handler);
 K_WORK_DELAYABLE_DEFINE(bond_change_work, bond_change_work_handler);
+K_WORK_DELAYABLE_DEFINE(channel_scan_work, channel_scan_work_handler);
+
+static void clear_session_reports(void)
+{
+	k_spinlock_key_t key;
+
+	(void)k_work_cancel_delayable(&feature_response_fallback_work);
+	key = k_spin_lock(&latest_input_lock);
+	pending_feature_response_len = 0;
+	pending_feature_generation++;
+	last_feature_response_len = 0;
+	last_feature_generation++;
+	pending_write_result_valid = false;
+	pending_write_generation++;
+	legacy_feature_fallback_pending = false;
+	latest_input_valid = false;
+	input_report_queue_head = 0;
+	input_report_queue_count = 0;
+	input_report_queue_generation++;
+	k_spin_unlock(&latest_input_lock, key);
+}
 
 static void refresh_pairing_bond(void)
 {
@@ -171,7 +198,7 @@ static int queue_payload(const struct valve_esb_payload *payload)
 {
 	int err;
 
-	if(atomic_get(&bond_change_pending) != 0)
+	if(atomic_get(&session_connected_public) == 0 || atomic_get(&bond_change_pending) != 0)
 	{
 		return -ECANCELED;
 	}
@@ -213,13 +240,38 @@ static void switch_channel(uint8_t channel)
 	(void)valve_esb_backend_start_rx();
 }
 
+static void reset_channel_map(uint8_t channel)
+{
+	k_spinlock_key_t key = k_spin_lock(&channel_map_lock);
+
+	pending_map_channel = ESB_CHANNEL_UNUSED;
+	pending_map_generation = (uint32_t)atomic_get(&session_generation);
+	channel_map[0] = channel;
+	for(size_t i = 1; i < ARRAY_SIZE(channel_map); ++i)
+	{
+		channel_map[i] = ESB_CHANNEL_UNUSED;
+	}
+	channel_map_index = 0;
+	k_spin_unlock(&channel_map_lock, key);
+}
+
 static void channel_map_work_handler(struct k_work *work)
 {
-	uint8_t channel = pending_map_channel;
+	k_spinlock_key_t key;
+	uint32_t generation;
+	uint8_t channel;
 
 	ARG_UNUSED(work);
 
-	if(!esb_started)
+	key = k_spin_lock(&channel_map_lock);
+	channel = pending_map_channel;
+	generation = pending_map_generation;
+	k_spin_unlock(&channel_map_lock, key);
+
+	if(!esb_started ||
+	   atomic_get(&session_connected_public) == 0 ||
+	   atomic_get(&bond_change_pending) != 0 ||
+	   generation != (uint32_t)atomic_get(&session_generation))
 	{
 		return;
 	}
@@ -227,7 +279,10 @@ static void channel_map_work_handler(struct k_work *work)
 	/* The original controller gives the puck's E4 reply time to finish. */
 	k_usleep(500);
 
-	if(!esb_started)
+	if(!esb_started ||
+	   atomic_get(&session_connected_public) == 0 ||
+	   atomic_get(&bond_change_pending) != 0 ||
+	   generation != (uint32_t)atomic_get(&session_generation))
 	{
 		return;
 	}
@@ -342,6 +397,15 @@ static void session_work_handler(struct k_work *work)
 		return;
 	}
 
+	/* A new E1 replaces the old private session. Stop producers and discard
+	 * relative input before readdressing so it cannot leak across reconnects. */
+	atomic_clear(&session_connected_public);
+	atomic_inc(&session_generation);
+	session_connected = false;
+	(void)k_work_cancel(&channel_map_work);
+	(void)k_work_cancel_delayable(&channel_scan_work);
+	clear_session_reports();
+
 	(void)valve_esb_backend_stop_rx();
 	(void)valve_esb_backend_flush_rx();
 	(void)valve_esb_backend_flush_tx();
@@ -349,17 +413,13 @@ static void session_work_handler(struct k_work *work)
 	(void)valve_esb_backend_set_base_address_0(pending_base);
 	(void)valve_esb_backend_set_prefixes(&pending_prefix, 1);
 	current_channel = pending_channel;
-	channel_map[0] = pending_channel;
-	for(size_t i = 1; i < ARRAY_SIZE(channel_map); ++i)
-	{
-		channel_map[i] = ESB_CHANNEL_UNUSED;
-	}
-	channel_map_index = 0;
-	last_host_rx_ms = k_uptime_get();
+	reset_channel_map(pending_channel);
+	atomic_set(&last_host_rx_ms, (atomic_val_t)k_uptime_get_32());
 	session_connected = true;
 	session_pending = false;
 	(void)valve_esb_backend_start_rx();
 	atomic_set(&session_connected_public, 1);
+	(void)k_work_reschedule(&channel_scan_work, K_MSEC(ESB_CHANNEL_HOLD_MS));
 	/* OFW activates input only after private RX is running. The reset wakes the
 	 * input loop, whose first fresh full-state sample builds the first F1. */
 	lizard_transport_reset();
@@ -372,7 +432,10 @@ K_WORK_DEFINE(session_work, session_work_handler);
 
 static void channel_scan_work_handler(struct k_work *work)
 {
-	int64_t silence_ms;
+	int32_t next_delay_ms;
+	k_spinlock_key_t key;
+	uint32_t silence_ms;
+	uint8_t channel;
 
 	ARG_UNUSED(work);
 
@@ -383,37 +446,70 @@ static void channel_scan_work_handler(struct k_work *work)
 
 	if(!session_connected || session_pending)
 	{
-		goto out;
+		return;
 	}
 
-	silence_ms = k_uptime_get() - last_host_rx_ms;
-	if(silence_ms < ESB_CHANNEL_SCAN_INITIAL_MS)
+	silence_ms = k_uptime_get_32() - (uint32_t)atomic_get(&last_host_rx_ms);
+	if(silence_ms >= ESB_SESSION_TIMEOUT_MS)
 	{
+		int err;
+
+		/* OFW abandons the private address after 0x4000 RTC ticks. */
+		atomic_clear(&session_connected_public);
+		atomic_inc(&session_generation);
+		session_connected = false;
+		session_pending = false;
+		(void)k_work_cancel(&channel_map_work);
+		pending_channel = ESB_DISCOVERY_CHANNEL;
+		memset(pending_base, 0, sizeof(pending_base));
+		pending_prefix = 0;
+		reset_channel_map(ESB_DISCOVERY_CHANNEL);
+		clear_session_reports();
+		configure_address(discovery_base, discovery_prefix);
+		err = valve_esb_backend_start_rx();
+		if(err)
+		{
+			LOG_WRN("failed to restart ESB discovery after session timeout: %d", err);
+		}
+		else
+		{
+			LOG_INF("ESB session timed out; returned to discovery");
+		}
+		return;
+	}
+	if(silence_ms < ESB_CHANNEL_HOLD_MS)
+	{
+		next_delay_ms = ESB_CHANNEL_HOLD_MS - silence_ms;
 		goto out;
 	}
 
+	channel = ESB_CHANNEL_UNUSED;
+	key = k_spin_lock(&channel_map_lock);
 	for(size_t i = 0; i < ARRAY_SIZE(channel_map); ++i)
 	{
 		channel_map_index = (channel_map_index + 1) % ARRAY_SIZE(channel_map);
 		if(channel_map[channel_map_index] != ESB_CHANNEL_UNUSED)
 		{
-			switch_channel(channel_map[channel_map_index]);
+			channel = channel_map[channel_map_index];
 			break;
 		}
 	}
+	k_spin_unlock(&channel_map_lock, key);
+	if(channel != ESB_CHANNEL_UNUSED)
+	{
+		switch_channel(channel);
+	}
+	next_delay_ms = ESB_CHANNEL_SCAN_INTERVAL_MS;
 
 out:
-	if(esb_started)
+	if(esb_started && session_connected && !session_pending)
 	{
-		k_work_reschedule(k_work_delayable_from_work(work), K_MSEC(ESB_CHANNEL_SCAN_INTERVAL_MS));
+		k_work_reschedule(k_work_delayable_from_work(work), K_MSEC(next_delay_ms));
 	}
 }
 
-K_WORK_DELAYABLE_DEFINE(channel_scan_work, channel_scan_work_handler);
-
 static void bond_change_work_handler(struct k_work *work)
 {
-	k_spinlock_key_t key;
 	int err;
 
 	ARG_UNUSED(work);
@@ -432,31 +528,17 @@ static void bond_change_work_handler(struct k_work *work)
 
 	session_connected = false;
 	atomic_clear(&session_connected_public);
+	atomic_inc(&session_generation);
 	session_pending = false;
 	pending_channel = ESB_DISCOVERY_CHANNEL;
 	memset(pending_base, 0, sizeof(pending_base));
 	pending_prefix = 0;
-	pending_map_channel = ESB_CHANNEL_UNUSED;
-	channel_map[0] = ESB_DISCOVERY_CHANNEL;
-	for(size_t i = 1; i < ARRAY_SIZE(channel_map); ++i)
-	{
-		channel_map[i] = ESB_CHANNEL_UNUSED;
-	}
-	channel_map_index = 0;
-	last_host_rx_ms = k_uptime_get();
+	reset_channel_map(ESB_DISCOVERY_CHANNEL);
+	atomic_set(&last_host_rx_ms, (atomic_val_t)k_uptime_get_32());
 	report_sequence = 0;
 	rejected_host_frame_logs_remaining = 8;
 
-	key = k_spin_lock(&latest_input_lock);
-	pending_feature_response_len = 0;
-	last_feature_response_len = 0;
-	pending_write_result_valid = false;
-	legacy_feature_fallback_pending = false;
-	latest_input_valid = false;
-	input_report_queue_head = 0;
-	input_report_queue_count = 0;
-	input_report_queue_generation++;
-	k_spin_unlock(&latest_input_lock, key);
+	clear_session_reports();
 
 	configure_address(discovery_base, discovery_prefix);
 	if(!esb_started)
@@ -473,7 +555,6 @@ static void bond_change_work_handler(struct k_work *work)
 	}
 	else
 	{
-		k_work_schedule(&channel_scan_work, K_MSEC(ESB_CHANNEL_SCAN_INTERVAL_MS));
 		LOG_INF("ESB discovery restarted after active bond change");
 	}
 }
@@ -784,31 +865,55 @@ static void handle_host_poll(const struct valve_esb_payload *payload)
 
 static void handle_host_channel_map(const struct valve_esb_payload *payload)
 {
+	uint8_t received_map[ESB_CHANNEL_MAP_SIZE];
+	k_spinlock_key_t key;
+	uint32_t generation;
+	bool submit_work = false;
 	size_t count;
 
-	if(payload->length < 2)
+	if(payload->length < 2 ||
+	   atomic_get(&session_connected_public) == 0 ||
+	   atomic_get(&bond_change_pending) != 0)
 	{
 		return;
 	}
 
+	generation = (uint32_t)atomic_get(&session_generation);
 	count = MIN(payload->length - 1, ARRAY_SIZE(channel_map));
 	for(size_t i = 0; i < count; ++i)
 	{
-		channel_map[i] = payload->data[i + 1];
+		received_map[i] = payload->data[i + 1];
 	}
 	for(size_t i = count; i < ARRAY_SIZE(channel_map); ++i)
 	{
-		channel_map[i] = ESB_CHANNEL_UNUSED;
+		received_map[i] = ESB_CHANNEL_UNUSED;
 	}
+
+	key = k_spin_lock(&channel_map_lock);
+	if(atomic_get(&session_connected_public) == 0 ||
+	   atomic_get(&bond_change_pending) != 0 ||
+	   generation != (uint32_t)atomic_get(&session_generation))
+	{
+		k_spin_unlock(&channel_map_lock, key);
+		return;
+	}
+	memcpy(channel_map, received_map, sizeof(channel_map));
 	channel_maps_received++;
+	pending_map_channel = channel_map[0];
+	pending_map_generation = generation;
 	if(channel_map[0] != current_channel && channel_map[0] != ESB_CHANNEL_UNUSED)
 	{
-		pending_map_channel = channel_map[0];
+		submit_work = true;
+	}
+	k_spin_unlock(&channel_map_lock, key);
+
+	if(submit_work)
+	{
 		k_work_submit(&channel_map_work);
 	}
 
-	LOG_DBG("ESB channel map: %u %u %u %u", channel_map[0], channel_map[1], channel_map[2],
-	        channel_map[3]);
+	LOG_DBG("ESB channel map: %u %u %u %u", received_map[0], received_map[1], received_map[2],
+	        received_map[3]);
 }
 
 static void handle_host_awake(const struct valve_esb_payload *payload)
@@ -843,7 +948,7 @@ static void event_handler(const struct valve_esb_backend_event *event)
 				{
 					continue;
 				}
-				last_host_rx_ms = k_uptime_get();
+				atomic_set(&last_host_rx_ms, (atomic_val_t)k_uptime_get_32());
 				switch(rx_payload.data[0])
 				{
 					case ESB_HOST_FRAME:
@@ -901,6 +1006,7 @@ int transport_esb_init(void)
 		return err;
 	}
 	esb_started = true;
+	atomic_inc(&session_generation);
 	if((err = valve_esb_backend_set_address_length(5)) != 0)
 	{
 		return err;
@@ -909,23 +1015,19 @@ int transport_esb_init(void)
 	configure_address(discovery_base, discovery_prefix);
 	LOG_INF("ESB listening on discovery address ibex/10, channel 2");
 	err = valve_esb_backend_start_rx();
-	if(!err)
-	{
-		k_work_schedule(&channel_scan_work, K_MSEC(ESB_CHANNEL_SCAN_INTERVAL_MS));
-	}
 	return err;
 }
 
 void transport_esb_deactivate(void)
 {
-	k_spinlock_key_t key;
-
 	if(!esb_started)
 	{
 		return;
 	}
 
 	esb_started = false;
+	atomic_clear(&session_connected_public);
+	atomic_inc(&session_generation);
 
 	/* Cancel pending and in-flight work before touching the backend. */
 	if(k_current_get() == k_work_queue_thread_get(&k_sys_work_q))
@@ -949,14 +1051,8 @@ void transport_esb_deactivate(void)
 	stop_and_flush();
 	valve_esb_backend_disable();
 	session_connected = false;
-	atomic_clear(&session_connected_public);
 	session_pending = false;
-	key = k_spin_lock(&latest_input_lock);
-	latest_input_valid = false;
-	input_report_queue_head = 0;
-	input_report_queue_count = 0;
-	input_report_queue_generation++;
-	k_spin_unlock(&latest_input_lock, key);
+	clear_session_reports();
 	atomic_clear(&bond_change_pending);
 }
 
