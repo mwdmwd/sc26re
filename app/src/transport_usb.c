@@ -32,6 +32,7 @@ LOG_MODULE_REGISTER(transport_usb);
 #define HID_REPORT_TYPE_OUTPUT 2
 #define HID_REPORT_TYPE_FEATURE 3
 #define USB_UNPLUG_POWEROFF_DELAY_MS 250
+#define USB_INPUT_RETRY_DELAY_MS 1
 #define USB_INPUT_REPORT_MAX_SIZE VALVE_FEATURE_REPORT_SIZE
 #define USB_INPUT_QUEUE_DEPTH 32
 
@@ -45,20 +46,20 @@ static const struct device *hid_dev;
 static uint8_t input_sequence;
 static uint8_t feature_response[VALVE_FEATURE_REPORT_SIZE];
 static uint8_t output_report[VALVE_FEATURE_REPORT_SIZE];
-static struct usb_input_queue_entry input_queue[USB_INPUT_QUEUE_DEPTH];
+K_MSGQ_DEFINE(input_queue, sizeof(struct usb_input_queue_entry), USB_INPUT_QUEUE_DEPTH, 1);
 static struct k_spinlock input_queue_lock;
-static uint8_t input_queue_head;
-static uint8_t input_queue_count;
 static bool input_transfer_active;
-static uint8_t input_transfer_report[USB_INPUT_REPORT_MAX_SIZE];
-static uint8_t input_transfer_len;
+static struct usb_input_queue_entry input_transfer;
 static atomic_t usb_initialized;
 static atomic_t usb_attached;
 static atomic_t usb_configured;
 static atomic_t usb_suspended;
 static atomic_t usb_radio_off_mode;
 
+static int usb_submit_next_input(void);
+static void usb_input_retry_work_handler(struct k_work *work);
 static void usb_unplug_poweroff_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(usb_input_retry_work, usb_input_retry_work_handler);
 static K_WORK_DELAYABLE_DEFINE(usb_unplug_poweroff_work, usb_unplug_poweroff_work_handler);
 
 static bool usb_vbus_present(void)
@@ -87,17 +88,21 @@ static bool usb_ready(void)
 
 static void usb_input_queue_reset(void)
 {
-	k_spinlock_key_t key = k_spin_lock(&input_queue_lock);
+	struct usb_input_queue_entry entry;
+	k_spinlock_key_t key;
 
-	input_queue_head = 0;
-	input_queue_count = 0;
+	(void)k_work_cancel_delayable(&usb_input_retry_work);
+	key = k_spin_lock(&input_queue_lock);
+
+	while(k_msgq_get(&input_queue, &entry, K_NO_WAIT) == 0)
+	{
+	}
 	input_transfer_active = false;
 	k_spin_unlock(&input_queue_lock, key);
 }
 
 static int usb_submit_next_input(void)
 {
-	struct usb_input_queue_entry *entry;
 	k_spinlock_key_t key;
 	int err;
 
@@ -107,40 +112,59 @@ static int usb_submit_next_input(void)
 	}
 
 	key = k_spin_lock(&input_queue_lock);
-	if(input_transfer_active || input_queue_count == 0)
+	if(input_transfer_active || k_msgq_peek(&input_queue, &input_transfer) != 0)
 	{
 		k_spin_unlock(&input_queue_lock, key);
 		return 0;
 	}
-	entry = &input_queue[input_queue_head];
-	input_transfer_len = entry->len;
-	memcpy(input_transfer_report, entry->data, entry->len);
 	input_transfer_active = true;
 	k_spin_unlock(&input_queue_lock, key);
 
-	err = hid_int_ep_write(hid_dev, input_transfer_report, input_transfer_len, NULL);
+	err = hid_int_ep_write(hid_dev, input_transfer.data, input_transfer.len, NULL);
 	if(err)
 	{
 		key = k_spin_lock(&input_queue_lock);
 		if(input_transfer_active)
 		{
 			input_transfer_active = false;
-			if(input_queue_count != 0)
-			{
-				input_queue_head = (input_queue_head + 1U) % ARRAY_SIZE(input_queue);
-				input_queue_count--;
-			}
 		}
 		k_spin_unlock(&input_queue_lock, key);
 	}
 	return err;
 }
 
+static void usb_input_retry_work_handler(struct k_work *work)
+{
+	int err;
+
+	ARG_UNUSED(work);
+
+	err = usb_submit_next_input();
+	if(err && err != -ENOTCONN)
+	{
+		(void)k_work_reschedule(&usb_input_retry_work, K_MSEC(USB_INPUT_RETRY_DELAY_MS));
+	}
+}
+
+static void usb_retry_input_later(int err)
+{
+	if(err == 0 || err == -ENOTCONN)
+	{
+		return;
+	}
+
+	LOG_WRN("USB queued input write failed: %d; retrying", err);
+	(void)k_work_reschedule(&usb_input_retry_work, K_MSEC(USB_INPUT_RETRY_DELAY_MS));
+}
+
 static int usb_queue_input_report(uint8_t report_id, const uint8_t *data, size_t len)
 {
-	struct usb_input_queue_entry *entry;
+	struct usb_input_queue_entry entry = {
+		.len = (uint8_t)(len + 1U),
+		.data = { report_id },
+	};
 	k_spinlock_key_t key;
-	uint8_t tail;
+	int err;
 
 	if(!usb_ready())
 	{
@@ -150,22 +174,20 @@ static int usb_queue_input_report(uint8_t report_id, const uint8_t *data, size_t
 	{
 		return -EINVAL;
 	}
+	memcpy(&entry.data[1], data, len);
 
 	key = k_spin_lock(&input_queue_lock);
-	if(input_queue_count == ARRAY_SIZE(input_queue))
-	{
-		k_spin_unlock(&input_queue_lock, key);
-		return -ENOMEM;
-	}
-	tail = (input_queue_head + input_queue_count) % ARRAY_SIZE(input_queue);
-	entry = &input_queue[tail];
-	entry->len = len + 1U;
-	entry->data[0] = report_id;
-	memcpy(&entry->data[1], data, len);
-	input_queue_count++;
+	err = k_msgq_put(&input_queue, &entry, K_NO_WAIT);
 	k_spin_unlock(&input_queue_lock, key);
+	if(err)
+	{
+		return err == -ENOMSG ? -ENOMEM : err;
+	}
 
-	return usb_submit_next_input();
+	err = usb_submit_next_input();
+	usb_retry_input_later(err);
+	/* The report is durable once it has entered input_queue. */
+	return 0;
 }
 
 static void usb_cancel_unplug_poweroff(void)
@@ -247,6 +269,7 @@ static void usb_status_cb(enum usb_dc_status_code status, const uint8_t *param)
 		case USB_DC_RESUME:
 			atomic_set(&usb_attached, 1);
 			atomic_clear(&usb_suspended);
+			(void)k_work_reschedule(&usb_input_retry_work, K_NO_WAIT);
 			break;
 		default:
 			break;
@@ -373,22 +396,15 @@ static void usb_input_ready(const struct device *dev)
 	if(input_transfer_active)
 	{
 		input_transfer_active = false;
-		if(input_queue_count != 0)
-		{
-			input_queue_head = (input_queue_head + 1U) % ARRAY_SIZE(input_queue);
-			input_queue_count--;
-		}
+		(void)k_msgq_get(&input_queue, &input_transfer, K_NO_WAIT);
 	}
-	submit_next = input_queue_count != 0;
+	submit_next = k_msgq_num_used_get(&input_queue) != 0;
 	k_spin_unlock(&input_queue_lock, key);
 
 	if(submit_next)
 	{
 		err = usb_submit_next_input();
-		if(err && err != -ENOTCONN)
-		{
-			LOG_WRN("USB queued input write failed: %d", err);
-		}
+		usb_retry_input_later(err);
 	}
 }
 

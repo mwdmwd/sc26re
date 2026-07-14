@@ -100,10 +100,8 @@ static uint32_t input_no_subscription_logs;
 static uint32_t input_notify_error_logs;
 static uint32_t input_42_reports_sent;
 static uint32_t input_45_reports_sent;
-static struct ble_lizard_input_entry lizard_input_queue[BLE_LIZARD_INPUT_QUEUE_DEPTH];
-static struct k_spinlock lizard_input_queue_lock;
-static uint8_t lizard_input_queue_head;
-static uint8_t lizard_input_queue_count;
+K_MSGQ_DEFINE(lizard_input_queue, sizeof(struct ble_lizard_input_entry),
+              BLE_LIZARD_INPUT_QUEUE_DEPTH, 1);
 static atomic_t lizard_input_queue_draining;
 
 VALVE_REPORT(input_40, 0x40, HIDS_INPUT, 5);
@@ -349,11 +347,11 @@ static struct valve_report *ble_lizard_report(uint8_t report_id, uint8_t *attr_i
 
 static void ble_lizard_input_queue_reset(void)
 {
-	k_spinlock_key_t key = k_spin_lock(&lizard_input_queue_lock);
+	struct ble_lizard_input_entry entry;
 
-	lizard_input_queue_head = 0;
-	lizard_input_queue_count = 0;
-	k_spin_unlock(&lizard_input_queue_lock, key);
+	while(k_msgq_get(&lizard_input_queue, &entry, K_NO_WAIT) == 0)
+	{
+	}
 }
 
 static int ble_lizard_input_queue_drain(void)
@@ -369,19 +367,14 @@ static int ble_lizard_input_queue_drain(void)
 	{
 		struct ble_lizard_input_entry entry;
 		struct valve_report *report;
-		k_spinlock_key_t key;
 		bool notify_enabled = false;
 		uint8_t attr_index = 0;
 		int err;
 
-		key = k_spin_lock(&lizard_input_queue_lock);
-		if(lizard_input_queue_count == 0)
+		if(k_msgq_peek(&lizard_input_queue, &entry) != 0)
 		{
-			k_spin_unlock(&lizard_input_queue_lock, key);
 			break;
 		}
-		entry = lizard_input_queue[lizard_input_queue_head];
-		k_spin_unlock(&lizard_input_queue_lock, key);
 
 		report = ble_lizard_report(entry.id, &attr_index, &notify_enabled);
 		if(report == NULL || entry.len != report->size || !notify_enabled)
@@ -401,14 +394,7 @@ static int ble_lizard_input_queue_drain(void)
 			break;
 		}
 
-		key = k_spin_lock(&lizard_input_queue_lock);
-		if(lizard_input_queue_count != 0)
-		{
-			lizard_input_queue_head =
-			    (lizard_input_queue_head + 1U) % ARRAY_SIZE(lizard_input_queue);
-			lizard_input_queue_count--;
-		}
-		k_spin_unlock(&lizard_input_queue_lock, key);
+		(void)k_msgq_get(&lizard_input_queue, &entry, K_NO_WAIT);
 		if(err)
 		{
 			result = err;
@@ -908,12 +894,13 @@ int transport_ble_send(const struct controller_report *report)
 
 int transport_ble_send_input_report(uint8_t report_id, const uint8_t *data, size_t len)
 {
-	struct ble_lizard_input_entry *entry;
+	struct ble_lizard_input_entry entry = {
+		.id = report_id,
+		.len = (uint8_t)len,
+	};
 	struct valve_report *report;
-	k_spinlock_key_t key;
 	bool notify_enabled = false;
 	uint8_t attr_index = 0;
-	uint8_t tail;
 	int err;
 
 	if(active_conn == NULL)
@@ -929,20 +916,13 @@ int transport_ble_send_input_report(uint8_t report_id, const uint8_t *data, size
 	{
 		return -ENOTCONN;
 	}
+	memcpy(entry.data, data, len);
 
-	key = k_spin_lock(&lizard_input_queue_lock);
-	if(lizard_input_queue_count == ARRAY_SIZE(lizard_input_queue))
+	err = k_msgq_put(&lizard_input_queue, &entry, K_NO_WAIT);
+	if(err)
 	{
-		k_spin_unlock(&lizard_input_queue_lock, key);
-		return -ENOMEM;
+		return err == -ENOMSG ? -ENOMEM : err;
 	}
-	tail = (lizard_input_queue_head + lizard_input_queue_count) % ARRAY_SIZE(lizard_input_queue);
-	entry = &lizard_input_queue[tail];
-	entry->id = report_id;
-	entry->len = len;
-	memcpy(entry->data, data, len);
-	lizard_input_queue_count++;
-	k_spin_unlock(&lizard_input_queue_lock, key);
 
 	err = ble_lizard_input_queue_drain();
 	return err == -EAGAIN ? 0 : err;
