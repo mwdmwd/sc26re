@@ -16,10 +16,11 @@ Currently working at least partially:
 - direct GPIO and GreenPAK-backed buttons
 - analog sticks and triggers
 - LSM6DSV16X accelerometer/gyro/quaternion IMU reports
-- Olympus touchpad: basic support
+- primary PWM and secondary I2S haptics backends
+- Olympus touchpad
 - RGBW LED
 - USB HID
-- BLE HID (only with SoftDevice/MPSL)
+- BLE HID using Zephyr's Free software Link Layer controller
 - ESB (puck) HID
 - ESB bonding over BLE/USB
 - BLE/ESB/USB personality switching, including with boot chords
@@ -27,13 +28,11 @@ Currently working at least partially:
 - Ibex settings registry (mostly only storage)
 - Valve bootloader-compatible packaging and flashing
 
-The most glaring omissions are haptics and polished touchpad behavior.
-
 ### TODO
 
 - [x] Olympus touchpad
   - [ ] Exactly OFW-matching pressure/click/deadzone behavior
-  - [ ] External power compensation (some parameter is changed when power is plugged in)
+  - [x] External power compensation
 - [x] Analog inputs
   - [ ] Trigger neutral deadzone seems too large
 - [x] Buttons
@@ -62,7 +61,7 @@ The most glaring omissions are haptics and polished touchpad behavior.
   - [x] Over BLE, mainly for ESB bonding
   - [x] With R1+A / R1+B boot chords
     - [ ] Second ESB bond with L1+A
-- [ ] Haptics
+- [x] Haptics
 - [ ] Freefall detection
   - [ ] Wilhelm scream
 - [ ] Puck / Proteus / Nereid
