@@ -26,7 +26,7 @@
 #define NRF_GPIO_PINS_PER_PORT 32
 #define STEAM_BUTTON_NODE DT_ALIAS(button_steam)
 
-#if DT_NODE_HAS_STATUS_OKAY(STEAM_BUTTON_NODE)
+#if DT_NODE_HAS_STATUS(STEAM_BUTTON_NODE, okay)
 #define STEAM_WAKE_PIN \
 	NRF_GPIO_PIN_MAP(DT_PROP(DT_GPIO_CTLR(STEAM_BUTTON_NODE, gpios), port), \
 			 DT_GPIO_PIN(STEAM_BUTTON_NODE, gpios))
@@ -58,7 +58,7 @@ static void power_arm_systemoff_wake(void)
 		}
 	}
 
-#if DT_NODE_HAS_STATUS_OKAY(STEAM_BUTTON_NODE)
+#if DT_NODE_HAS_STATUS(STEAM_BUTTON_NODE, okay)
 	nrf_gpio_cfg_sense_set(STEAM_WAKE_PIN, STEAM_WAKE_SENSE);
 	LOG_INF("armed Steam button as sole SYSTEMOFF GPIO wake source");
 #else

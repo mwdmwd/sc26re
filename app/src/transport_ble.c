@@ -691,7 +691,7 @@ BT_CONN_CB_DEFINE(ble_conn_cbs) = {
 int transport_ble_init(void)
 {
 	struct bt_le_adv_param adv_param = BT_LE_ADV_PARAM_INIT(
-	    BT_LE_ADV_OPT_CONNECTABLE, BT_GAP_ADV_FAST_INT_MIN_2, BT_GAP_ADV_FAST_INT_MAX_2, NULL);
+	    BT_LE_ADV_OPT_CONN, BT_GAP_ADV_FAST_INT_MIN_2, BT_GAP_ADV_FAST_INT_MAX_2, NULL);
 	uint8_t selected_id;
 	const char *device_name;
 	int err;

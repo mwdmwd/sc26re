@@ -37,7 +37,7 @@ Development target using Zephyr's in-tree BBC micro:bit v2 board, plus a small a
 
 ## Building
 
-The repository Makefile uses Zephyr SDK `0.17.0`, matching the SDK expected by the current NCS v2.9.0 baseline.
+The repository pins upstream Zephyr 4.4.1 and Zephyr SDK `1.0.1`.
 
 Install the ARM SDK subset:
 
@@ -63,13 +63,15 @@ Direct `west` builds are also possible:
 
 ```sh
 cd zephyr
-ZEPHYR_SDK_INSTALL_DIR=../sdk/zephyr-sdk-0.17.0 \
+ZEPHYR_SDK_INSTALL_DIR=../sdk/zephyr-sdk-1.0.1 \
   west build -p auto -b bbc_microbit_v2 ../app \
-  -d build-app-microbit
+  -d build-app-microbit -- \
+  -DEXTRA_CONF_FILE="ble.conf;esb.conf"
 
-ZEPHYR_SDK_INSTALL_DIR=../sdk/zephyr-sdk-0.17.0 \
+ZEPHYR_SDK_INSTALL_DIR=../sdk/zephyr-sdk-1.0.1 \
   west build -p auto -b steam_controller_ibex/nrf52833 \
-  ../app -d build-app-ibex -- -DBOARD_ROOT=../app
+  ../app -d build-app-ibex -- -DBOARD_ROOT=../app \
+  -DEXTRA_CONF_FILE="ble.conf;esb.conf"
 ```
 
 ## Flashing Ibex
@@ -161,7 +163,9 @@ steamctl radio esb_bond <proteus_uuid> <ibex_uuid> [serial]
 
 ## Radio
 
-The normal Ibex build includes ESB and USB support. There is the option to build with BLE support along with ESB, but it is not the default because it requires proprietary Nordic SoftDevice libraries with an incompatible license and the resulting binaries are not redistributable. To build with BLE support, pass `REDIST=0` to the Makefile.
+The firmware includes BLE, ESB, and USB support. Bluetooth uses Zephyr's Host and Free `BT_LL_SW_SPLIT` controller. ESB uses a direct nRF RADIO backend. The build does not include NCS, MPSL, the SoftDevice Controller, nrfxlib, or any nonfree Nordic libraries.
+
+BLE and ESB share the radio, so only one radio personality runs per boot. Use the `steamctl radio` commands or the boot chords to select one, changing the radio personality reboots the controller. If coexistence is needed in the future, it will be added without MPSL, how hard could it be?
 
 ## Power
 
@@ -170,6 +174,4 @@ Battery level, charger detection, charging behavior, and OFW-matching idle curre
 
 ## Haptics
 
-The micro:bit target has a tiny PWM piezo beep for button-press feedback.
-
-Haptics for the real controller are not yet implemented.
+The micro:bit target has a tiny PWM piezo beep for button-press feedback. The Ibex target has its primary touchpad PWM and secondary GRI-v3 I2S actuator paths enabled.

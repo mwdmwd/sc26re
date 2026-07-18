@@ -177,7 +177,7 @@ static const struct gpio_dt_spec haptics_enable = GPIO_DT_SPEC_GET(IBEX_HAPTICS_
 static const struct gpio_dt_spec haptics_secondary_enable =
     GPIO_DT_SPEC_GET_OR(IBEX_HAPTICS_NODE, secondary_enable_gpios, { 0 });
 static const struct device *const haptics_i2s = DEVICE_DT_GET(IBEX_HAPTICS_I2S_NODE);
-static const nrfx_pwm_t haptics_pwm = NRFX_PWM_INSTANCE(IBEX_HAPTICS_PWM_INSTANCE_ID);
+static nrfx_pwm_t haptics_pwm = NRFX_PWM_INSTANCE(NRF_PWM_INST_GET(IBEX_HAPTICS_PWM_INSTANCE_ID));
 
 static K_MUTEX_DEFINE(haptics_state_mutex);
 static K_SEM_DEFINE(haptics_primary_sem, 0, 1);
@@ -186,8 +186,8 @@ static struct k_thread haptics_primary_thread;
 static struct k_thread haptics_secondary_thread;
 static K_THREAD_STACK_DEFINE(haptics_primary_stack, IBEX_HAPTICS_THREAD_STACK_SIZE);
 static K_THREAD_STACK_DEFINE(haptics_secondary_stack, IBEX_HAPTICS_THREAD_STACK_SIZE);
-static K_MEM_SLAB_DEFINE(haptics_i2s_slab, IBEX_HAPTICS_SECONDARY_BLOCK_BYTES,
-                         IBEX_HAPTICS_I2S_BLOCK_COUNT, 4);
+K_MEM_SLAB_DEFINE(haptics_i2s_slab, IBEX_HAPTICS_SECONDARY_BLOCK_BYTES,
+                  IBEX_HAPTICS_I2S_BLOCK_COUNT, 4);
 
 static nrf_pwm_values_grouped_t haptics_sequences[IBEX_HAPTICS_PRIMARY_BUFFER_COUNT]
                                                  [IBEX_HAPTICS_PRIMARY_BLOCK_SAMPLES];
@@ -1049,17 +1049,17 @@ static bool amplifier_forced_on(void)
 	return atomic_get(&haptics_amplifier_mode) != 0;
 }
 
-static void haptics_pwm_event_handler(nrfx_pwm_evt_type_t event_type, void *context)
+static void haptics_pwm_event_handler(nrfx_pwm_event_type_t event_type, void *context)
 {
 	ARG_UNUSED(context);
 
-	if(event_type == NRFX_PWM_EVT_END_SEQ0)
+	if(event_type == NRFX_PWM_EVENT_END_SEQ0)
 	{
 		atomic_or(&haptics_primary_completed, BIT(0));
 		atomic_set(&haptics_primary_last_completed, 0);
 		k_sem_give(&haptics_primary_sem);
 	}
-	else if(event_type == NRFX_PWM_EVT_END_SEQ1)
+	else if(event_type == NRFX_PWM_EVENT_END_SEQ1)
 	{
 		atomic_or(&haptics_primary_completed, BIT(1));
 		atomic_set(&haptics_primary_last_completed, 1);
@@ -1095,9 +1095,10 @@ static void primary_start_neutral(void)
 
 static int pwm_stop_outputs(void)
 {
+	bool was_running = haptics_primary_running;
 	int err = gpio_pin_set_dt(&haptics_enable, amplifier_forced_on() ? 1 : 0);
 
-	if(haptics_primary_running && nrfx_pwm_init_check(&haptics_pwm))
+	if(was_running && nrfx_pwm_init_check(&haptics_pwm))
 	{
 		(void)nrfx_pwm_stop(&haptics_pwm, true);
 	}
@@ -1107,7 +1108,7 @@ static int pwm_stop_outputs(void)
 	atomic_set(&haptics_primary_completed, 0);
 	if(nrfx_pwm_init_check(&haptics_pwm) && !haptics_primary_idle)
 	{
-		/* OFW leaves the last neutral PWM value driving the pins between effects. */
+		/* Keep neutral PWM driving between effects and before the first amplifier enable. */
 		primary_start_neutral();
 	}
 	return err;
@@ -1695,17 +1696,17 @@ int haptics_backend_init(void)
 		.word_size = 16,
 		.channels = 2,
 		.format = I2S_FMT_DATA_FORMAT_I2S | I2S_FMT_DATA_ORDER_MSB | I2S_FMT_CLK_NF_NB,
-		.options = I2S_OPT_BIT_CLK_CONT | I2S_OPT_BIT_CLK_MASTER | I2S_OPT_FRAME_CLK_MASTER,
+		.options = I2S_OPT_BIT_CLK_CONT | I2S_OPT_BIT_CLK_CONTROLLER | I2S_OPT_FRAME_CLK_CONTROLLER,
 		.frame_clk_freq = IBEX_HAPTICS_SECONDARY_SAMPLE_RATE_HZ,
 		.mem_slab = &haptics_i2s_slab,
 		.block_size = IBEX_HAPTICS_SECONDARY_BLOCK_BYTES,
 		.timeout = SYS_FOREVER_MS,
 	};
-	nrfx_err_t err;
+	int err;
 	int ret;
 
 	IRQ_CONNECT(NRFX_IRQ_NUMBER_GET(NRF_PWM_INST_GET(IBEX_HAPTICS_PWM_INSTANCE_ID)),
-	            IRQ_PRIO_LOWEST, NRFX_PWM_INST_HANDLER_GET(IBEX_HAPTICS_PWM_INSTANCE_ID), 0, 0);
+	            IRQ_PRIO_LOWEST, nrfx_pwm_irq_handler, &haptics_pwm, 0);
 
 	if(!device_is_ready(haptics_enable.port))
 	{
@@ -1743,11 +1744,11 @@ int haptics_backend_init(void)
 	config.irq_priority = IRQ_PRIO_LOWEST;
 
 	err = nrfx_pwm_init(&haptics_pwm, &config, haptics_pwm_event_handler, NULL);
-	if(err == NRFX_ERROR_ALREADY)
+	if(err == -EALREADY)
 	{
 		return -EBUSY;
 	}
-	if(err != NRFX_SUCCESS)
+	if(err != 0)
 	{
 		return -EIO;
 	}

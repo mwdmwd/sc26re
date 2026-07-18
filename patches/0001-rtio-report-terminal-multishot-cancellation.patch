@@ -1,0 +1,262 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SC26re user <@>
+Date: Mon, 20 Jul 2026 01:35:05 +0200
+Subject: [PATCH] rtio: report terminal multishot cancellation
+
+
+diff --git a/subsys/rtio/rtio_executor.c b/subsys/rtio/rtio_executor.c
+index bc5534d013d..1cede2e4e28 100644
+--- a/subsys/rtio/rtio_executor.c
++++ b/subsys/rtio/rtio_executor.c
+@@ -92,9 +92,15 @@ void rtio_executor_submit(struct rtio *r)
+ 	while (node != NULL) {
+ 		struct rtio_iodev_sqe *iodev_sqe = CONTAINER_OF(node, struct rtio_iodev_sqe, q);
+ 
+-		/* If this submission was cancelled before submit, then generate no response */
+-		if (iodev_sqe->sqe.flags  & RTIO_SQE_CANCELED) {
+-			iodev_sqe->sqe.flags |= cancel_no_response;
++		/*
++		 * A canceled multishot needs a terminal CQE so its owner knows the
++		 * reusable SQE has been released. Preserve the existing silent-cancel
++		 * behavior for one-shot submissions.
++		 */
++		if (iodev_sqe->sqe.flags & RTIO_SQE_CANCELED) {
++			if ((iodev_sqe->sqe.flags & RTIO_SQE_MULTISHOT) == 0U) {
++				iodev_sqe->sqe.flags |= cancel_no_response;
++			}
+ 		}
+ 		iodev_sqe->r = r;
+ 
+@@ -159,6 +165,17 @@ static inline void rtio_executor_handle_multishot(struct rtio_iodev_sqe *iodev_s
+ 	const bool requires_response = FIELD_GET(RTIO_SQE_NO_RESPONSE, iodev_sqe->sqe.flags) == 0;
+ 	uint32_t cqe_flags = rtio_cqe_compute_flags(iodev_sqe);
+ 	void *userdata = iodev_sqe->sqe.userdata;
++	int completion_result = result;
++
++	/*
++	 * Cancellation can race a successful device completion. The request is
++	 * terminal in that case, so report the cancellation instead of a final
++	 * success that an application could mistake for another live shot. Keep a
++	 * real device error when cancellation and failure coincide.
++	 */
++	if (is_canceled && is_ok) {
++		completion_result = -ECANCELED;
++	}
+ 
+ 	/** We're releasing reasources when erroring as an error handling scheme of multi-shot
+ 	 * submissions by requiring to stop re-submitting if something goes wrong. Let the
+@@ -170,21 +187,40 @@ static inline void rtio_executor_handle_multishot(struct rtio_iodev_sqe *iodev_s
+ 			iodev_sqe->sqe.rx.buf_len);
+ 		rtio_release_buffer(r, iodev_sqe->sqe.rx.buf, iodev_sqe->sqe.rx.buf_len);
+ 		rtio_sqe_pool_free(r->sqe_pool, iodev_sqe);
+-	} else {
+-		/* Request was not canceled, put the SQE back in the queue */
+-		if (iodev_sqe->sqe.op == RTIO_OP_RX && uses_mempool) {
+-			/* Reset the buffer info so the next request can get a new one */
+-			iodev_sqe->sqe.rx.buf = NULL;
+-			iodev_sqe->sqe.rx.buf_len = 0;
+-		}
+ 
+-		mpsc_push(&r->sq, &iodev_sqe->q);
+-		rtio_executor_submit(r);
++		if (requires_response) {
++			/* Any receive buffer referenced by the SQE was released above. */
++			rtio_cqe_submit(r, completion_result, userdata, 0);
++		}
++		return;
++	}
++
++	/*
++	 * Transfer any receive-buffer ownership to this successful CQE before it is
++	 * visible to the consumer. The consumer may release and immediately reuse
++	 * the buffer as soon as the CQE is published.
++	 */
++	if (iodev_sqe->sqe.op == RTIO_OP_RX && uses_mempool) {
++		iodev_sqe->sqe.rx.buf = NULL;
++		iodev_sqe->sqe.rx.buf_len = 0;
+ 	}
+ 
+ 	if (requires_response) {
+ 		rtio_cqe_submit(r, result, userdata, cqe_flags);
+ 	}
++
++	/* Cancellation may have arrived after the initial snapshot above. */
++	if (FIELD_GET(RTIO_SQE_CANCELED, iodev_sqe->sqe.flags) == 1) {
++		rtio_sqe_pool_free(r->sqe_pool, iodev_sqe);
++		if (requires_response) {
++			rtio_cqe_submit(r, -ECANCELED, userdata, 0);
++		}
++		return;
++	}
++
++	/* Request is still live; put the SQE back in the queue for its next shot. */
++	mpsc_push(&r->sq, &iodev_sqe->q);
++	rtio_executor_submit(r);
+ }
+ 
+ /**
+diff --git a/tests/subsys/rtio/rtio_api/src/test_rtio_api.c b/tests/subsys/rtio/rtio_api/src/test_rtio_api.c
+index 29303fb3a6d..cc9a1eea5ce 100644
+--- a/tests/subsys/rtio/rtio_api/src/test_rtio_api.c
++++ b/tests/subsys/rtio/rtio_api/src/test_rtio_api.c
+@@ -518,11 +518,22 @@ static inline void test_rtio_simple_multishot_(struct rtio *r, int idx)
+ 
+ 	TC_PRINT("Canceling %p\n", handle);
+ 	rtio_sqe_cancel(handle);
+-	/* Flush any pending CQEs */
++	bool saw_canceled = false;
++
++	/* Flush any already completed shots, then require the terminal marker. */
+ 	while (rtio_cqe_copy_out(r, &cqe, 1, K_MSEC(15)) != 0) {
+-		rtio_cqe_get_mempool_buffer(r, &cqe, &buffer, &buffer_len);
++		if (cqe.result == -ECANCELED) {
++			zassert_equal(-EINVAL,
++				      rtio_cqe_get_mempool_buffer(r, &cqe, &buffer, &buffer_len));
++			saw_canceled = true;
++			break;
++		}
++
++		zassert_ok(cqe.result, "Unexpected multishot result %d", cqe.result);
++		zassert_ok(rtio_cqe_get_mempool_buffer(r, &cqe, &buffer, &buffer_len));
+ 		rtio_release_buffer(r, buffer, buffer_len);
+ 	}
++	zassert_true(saw_canceled, "Expected a terminal cancellation CQE");
+ }
+ 
+ ZTEST_USER(rtio_api, test_rtio_multishot)
+@@ -532,6 +543,135 @@ ZTEST_USER(rtio_api, test_rtio_multishot)
+ 	}
+ }
+ 
++RTIO_DEFINE_WITH_MEMPOOL(r_multishot_cancel, 1, 2, 1, MEM_BLK_SIZE, MEM_BLK_ALIGN);
++
++struct multishot_cancel_race_data {
++	struct rtio_iodev_sqe *pending;
++};
++
++static struct multishot_cancel_race_data multishot_cancel_race_data;
++
++static void multishot_cancel_race_submit(struct rtio_iodev_sqe *iodev_sqe)
++{
++	struct rtio_iodev *iodev = (struct rtio_iodev *)iodev_sqe->sqe.iodev;
++	struct multishot_cancel_race_data *data = iodev->data;
++
++	data->pending = iodev_sqe;
++}
++
++static const struct rtio_iodev_api multishot_cancel_race_api = {
++	.submit = multishot_cancel_race_submit,
++};
++
++RTIO_IODEV_DEFINE(multishot_cancel_race_iodev, &multishot_cancel_race_api,
++		  &multishot_cancel_race_data);
++RTIO_DEFINE(r_multishot_cancel_race, 1, 3);
++K_SEM_DEFINE(multishot_cancel_race_complete_sem, 0, 1);
++K_THREAD_STACK_DEFINE(multishot_cancel_race_stack, 1024);
++static struct k_thread multishot_cancel_race_thread;
++
++static void multishot_cancel_race_thread_fn(void *arg1, void *arg2, void *arg3)
++{
++	struct multishot_cancel_race_data *data = arg1;
++
++	ARG_UNUSED(arg2);
++	ARG_UNUSED(arg3);
++
++	k_sem_take(&multishot_cancel_race_complete_sem, K_FOREVER);
++	rtio_iodev_sqe_ok(data->pending, 0);
++}
++
++ZTEST(rtio_api, test_rtio_multishot_cancel_before_submit_reports_terminal)
++{
++	uint8_t data[MEM_BLK_SIZE] = {0};
++	struct rtio_sqe sqe;
++	struct rtio_sqe *handle;
++	struct rtio_cqe cqe;
++	uint8_t *buffer;
++	uint32_t buffer_len;
++
++	rtio_sqe_prep_read_multishot(&sqe, (struct rtio_iodev *)&iodev_test_simple, 0, data);
++	zassert_ok(rtio_sqe_copy_in_get_handles(&r_multishot_cancel, &sqe, &handle, 1));
++	zassert_ok(rtio_sqe_cancel(handle));
++	zassert_ok(rtio_submit(&r_multishot_cancel, 0));
++
++	zassert_equal(1, rtio_cqe_copy_out(&r_multishot_cancel, &cqe, 1, K_FOREVER));
++	zassert_equal(-ECANCELED, cqe.result);
++	zassert_equal(-EINVAL,
++		      rtio_cqe_get_mempool_buffer(&r_multishot_cancel, &cqe, &buffer, &buffer_len));
++	zassert_equal(0, rtio_cqe_copy_out(&r_multishot_cancel, &cqe, 1, K_NO_WAIT));
++
++	/* A terminal CQE also means the context's only SQE was returned. */
++	zassert_not_null(rtio_sqe_acquire(&r_multishot_cancel));
++	rtio_sqe_drop_all(&r_multishot_cancel);
++}
++
++ZTEST(rtio_api, test_rtio_multishot_cancel_during_requeue_reports_terminal)
++{
++	struct rtio_sqe sqe;
++	struct rtio_sqe *handle;
++	struct rtio_cqe cqe;
++	struct rtio_cqe *cqe_ptr;
++	int helper_priority = k_thread_priority_get(k_current_get()) + 1;
++
++	zassert_true(helper_priority <= K_LOWEST_APPLICATION_THREAD_PRIO);
++	multishot_cancel_race_data.pending = NULL;
++	k_sem_reset(&multishot_cancel_race_complete_sem);
++
++	rtio_sqe_prep_nop(&sqe, &multishot_cancel_race_iodev, NULL);
++	sqe.flags |= RTIO_SQE_MULTISHOT;
++	zassert_ok(rtio_sqe_copy_in_get_handles(&r_multishot_cancel_race, &sqe, &handle, 1));
++	zassert_ok(rtio_submit(&r_multishot_cancel_race, 0));
++	zassert_not_null(multishot_cancel_race_data.pending);
++
++	k_thread_create(&multishot_cancel_race_thread, multishot_cancel_race_stack,
++			K_THREAD_STACK_SIZEOF(multishot_cancel_race_stack),
++			multishot_cancel_race_thread_fn, &multishot_cancel_race_data, NULL, NULL,
++			helper_priority, 0, K_NO_WAIT);
++	k_sem_give(&multishot_cancel_race_complete_sem);
++
++	/* The success wakes this higher-priority test inside the completion handler. */
++	cqe_ptr = rtio_cqe_consume_block(&r_multishot_cancel_race);
++	zassert_ok(cqe_ptr->result);
++	rtio_cqe_release(&r_multishot_cancel_race, cqe_ptr);
++	zassert_ok(rtio_sqe_cancel(handle));
++
++	/* The lower-priority handler resumes and observes cancellation during requeue. */
++	cqe_ptr = rtio_cqe_consume_block(&r_multishot_cancel_race);
++	zassert_equal(-ECANCELED, cqe_ptr->result);
++	zassert_equal(0, cqe_ptr->flags);
++	rtio_cqe_release(&r_multishot_cancel_race, cqe_ptr);
++	zassert_ok(k_thread_join(&multishot_cancel_race_thread, K_FOREVER));
++	zassert_equal(0, rtio_cqe_copy_out(&r_multishot_cancel_race, &cqe, 1, K_NO_WAIT));
++
++	/* The terminal CQE means the context's only SQE was returned exactly once. */
++	zassert_not_null(rtio_sqe_acquire(&r_multishot_cancel_race));
++	rtio_sqe_drop_all(&r_multishot_cancel_race);
++}
++
++ZTEST(rtio_api, test_rtio_multishot_cancel_preserves_device_error)
++{
++	struct rtio_sqe sqe;
++	struct rtio_sqe *handle;
++	struct rtio_cqe cqe;
++
++	multishot_cancel_race_data.pending = NULL;
++	rtio_sqe_prep_nop(&sqe, &multishot_cancel_race_iodev, NULL);
++	sqe.flags |= RTIO_SQE_MULTISHOT;
++	zassert_ok(rtio_sqe_copy_in_get_handles(&r_multishot_cancel_race, &sqe, &handle, 1));
++	zassert_ok(rtio_submit(&r_multishot_cancel_race, 0));
++	zassert_not_null(multishot_cancel_race_data.pending);
++
++	zassert_ok(rtio_sqe_cancel(handle));
++	rtio_iodev_sqe_err(multishot_cancel_race_data.pending, -EIO);
++	zassert_equal(1, rtio_cqe_copy_out(&r_multishot_cancel_race, &cqe, 1, K_FOREVER));
++	zassert_equal(-EIO, cqe.result);
++	zassert_equal(0, cqe.flags);
++	zassert_equal(0, rtio_cqe_copy_out(&r_multishot_cancel_race, &cqe, 1, K_NO_WAIT));
++	zassert_not_null(rtio_sqe_acquire(&r_multishot_cancel_race));
++	rtio_sqe_drop_all(&r_multishot_cancel_race);
++}
++
+ ZTEST(rtio_api, test_rtio_multishot_are_not_resubmitted_when_failed)
+ {
+ 	int res;

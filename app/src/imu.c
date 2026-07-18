@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include <errno.h>
+#include <math.h>
 #include <string.h>
 
 #include <zephyr/device.h>
@@ -8,18 +9,21 @@
 #include <zephyr/drivers/sensor/lsm6dsv16x.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/rtio/rtio.h>
 #include <zephyr/settings/settings.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
 #include "controller.h"
 #include "ibex_settings_registry.h"
 #include "imu.h"
+#include "imu_bias.h"
 #include "sdl/controller_constants.h"
 
 LOG_MODULE_REGISTER(imu);
 
-#if CONFIG_IBEX_ACCELEROMETER && DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(accel0))
+#if CONFIG_IBEX_ACCELEROMETER && DT_NODE_HAS_STATUS(DT_ALIAS(accel0), okay)
 #define IMU_HAS_DEVICE 1
 static const struct device *const imu_dev = DEVICE_DT_GET(DT_ALIAS(accel0));
 #else
@@ -31,6 +35,14 @@ static const struct device *const imu_dev = DEVICE_DT_GET(DT_ALIAS(accel0));
 #define IMU_DEGREES_E5_PER_RADIAN 5729578.0f
 #define IMU_QUATERNION_REPORT_SCALE INT16_MAX
 #define IMU_SFLP_BIAS_UPDATE_INTERVAL_US USEC_PER_SEC
+#define IMU_STREAM_THREAD_STACK_SIZE 2048
+#define IMU_STREAM_THREAD_PRIORITY 9
+#define IMU_STREAM_CQE_COUNT 16
+#define IMU_STREAM_BUFFER_COUNT 8
+#define IMU_STREAM_BUFFER_SIZE 512
+#define IMU_STREAM_RETRY_INITIAL_MS 10U
+#define IMU_STREAM_RETRY_MAX_MS 1000U
+#define IMU_STREAM_RESTART_TIMEOUT_MS 1000U
 
 #define IMU_MODE_PATH "settings/sensors/imu/mode"
 #define IMU_MOUNTING_MATRIX_PATH "settings/sensors/imu/mounting_matrix"
@@ -65,19 +77,33 @@ static int64_t last_sflp_bias_update_us;
 static bool registry_callback_replay;
 static struct controller_report cached_imu_report;
 static struct k_spinlock cached_imu_report_lock;
-static bool imu_motion_trigger_enabled;
-static bool imu_trigger_ready;
+#if IMU_HAS_DEVICE
+static atomic_t imu_motion_trigger_enabled;
+static atomic_t imu_stream_active;
+static struct
+{
+	struct k_spinlock lock;
+	uint32_t requested_generation;
+	uint32_t completed_generation;
+	int result;
+} imu_stream_restart;
+static float latest_sflp_bias[3];
+static bool latest_sflp_bias_valid;
+#endif
 
 K_MUTEX_DEFINE(imu_io_lock);
 
 #if IMU_HAS_DEVICE
-static const struct sensor_trigger imu_fifo_trigger = {
-	.type = SENSOR_TRIG_FIFO_WATERMARK,
-	.chan = (enum sensor_channel)LSM6DSV16X_SENSOR_CHAN_FIFO,
-};
-
-static void imu_fifo_trigger_handler(const struct device *dev,
-                                     const struct sensor_trigger *trigger);
+SENSOR_DT_STREAM_IODEV(imu_stream_iodev, DT_ALIAS(accel0),
+                       { SENSOR_TRIG_FIFO_WATERMARK, SENSOR_STREAM_DATA_INCLUDE });
+RTIO_DEFINE_WITH_MEMPOOL(imu_stream_rtio, 1, IMU_STREAM_CQE_COUNT, IMU_STREAM_BUFFER_COUNT,
+                         IMU_STREAM_BUFFER_SIZE, sizeof(void *));
+K_SEM_DEFINE(imu_stream_start_sem, 0, 1);
+K_SEM_DEFINE(imu_stream_restart_done_sem, 0, 1);
+K_MUTEX_DEFINE(imu_bias_program_lock);
+K_THREAD_STACK_DEFINE(imu_stream_stack, IMU_STREAM_THREAD_STACK_SIZE);
+static struct k_thread imu_stream_thread;
+static void imu_stream_thread_main(void *arg1, void *arg2, void *arg3);
 #endif
 
 struct imu_settings_load_target
@@ -87,9 +113,10 @@ struct imu_settings_load_target
 	bool loaded;
 };
 
-static float sensor_value_to_float_s(const struct sensor_value *value)
+#if IMU_HAS_DEVICE
+static float q31_to_float(q31_t value, int8_t shift)
 {
-	return sensor_value_to_float(value);
+	return ldexpf((float)value, shift - 31);
 }
 
 static int16_t clamp_i16_int(int32_t value)
@@ -97,12 +124,12 @@ static int16_t clamp_i16_int(int32_t value)
 	return (int16_t)CLAMP(value, INT16_MIN, INT16_MAX);
 }
 
-static int16_t accel_axis_to_report(const struct sensor_value *value)
+static int16_t accel_axis_to_report(float ms2)
 {
-	int64_t micro_ms2 = sensor_value_to_micro(value);
-	int64_t micro_g = micro_ms2 * 1000000 / SENSOR_G;
+	float report_units =
+	    ms2 * 1000000.0f / ((float)SENSOR_G / 1000000.0f * IMU_ACCEL_UG_PER_REPORT_UNIT);
 
-	return clamp_i16_int((int32_t)(micro_g / IMU_ACCEL_UG_PER_REPORT_UNIT));
+	return clamp_i16_int((int32_t)report_units);
 }
 
 static int16_t gyro_axis_to_report(float rad_s)
@@ -112,10 +139,8 @@ static int16_t gyro_axis_to_report(float rad_s)
 	return clamp_i16_int(degrees_e5 / IMU_GYRO_REPORT_SCALE_DIVISOR);
 }
 
-static int16_t quaternion_component_to_report(const struct sensor_value *value)
+static int16_t quaternion_component_to_report(float component)
 {
-	float component = sensor_value_to_float_s(value);
-
 	return clamp_i16_int((int32_t)(component * IMU_QUATERNION_REPORT_SCALE));
 }
 
@@ -134,6 +159,7 @@ static void apply_orientation_i16(int16_t xyz[3])
 		xyz[row] = clamp_i16_int(value);
 	}
 }
+#endif
 
 static void fill_identity_quaternion_report(struct controller_report *report)
 {
@@ -143,21 +169,22 @@ static void fill_identity_quaternion_report(struct controller_report *report)
 	report->gyro_quat_z = 0;
 }
 
-static void fill_quaternion_report(struct controller_report *report,
-                                   const struct sensor_value value[4])
+#if IMU_HAS_DEVICE
+static void fill_quaternion_report(struct controller_report *report, const float value[4])
 {
 	int16_t xyz[3] = {
-		quaternion_component_to_report(&value[0]),
-		quaternion_component_to_report(&value[1]),
-		quaternion_component_to_report(&value[2]),
+		quaternion_component_to_report(value[0]),
+		quaternion_component_to_report(value[1]),
+		quaternion_component_to_report(value[2]),
 	};
 
 	apply_orientation_i16(xyz);
-	report->gyro_quat_w = quaternion_component_to_report(&value[3]);
+	report->gyro_quat_w = quaternion_component_to_report(value[3]);
 	report->gyro_quat_x = xyz[0];
 	report->gyro_quat_y = xyz[1];
 	report->gyro_quat_z = xyz[2];
 }
+#endif
 
 static void copy_imu_report_fields(struct controller_report *dst,
                                    const struct controller_report *src)
@@ -175,6 +202,7 @@ static void copy_imu_report_fields(struct controller_report *dst,
 	dst->imu_timestamp_us = src->imu_timestamp_us;
 }
 
+#if IMU_HAS_DEVICE
 static void store_cached_imu_report(const struct controller_report *report)
 {
 	k_spinlock_key_t key = k_spin_lock(&cached_imu_report_lock);
@@ -182,6 +210,7 @@ static void store_cached_imu_report(const struct controller_report *report)
 	copy_imu_report_fields(&cached_imu_report, report);
 	k_spin_unlock(&cached_imu_report_lock, key);
 }
+#endif
 
 static void load_cached_imu_report(struct controller_report *report)
 {
@@ -191,7 +220,8 @@ static void load_cached_imu_report(struct controller_report *report)
 	k_spin_unlock(&cached_imu_report_lock, key);
 }
 
-static void update_bias_candidate_from_sflp(const struct sensor_value value[3])
+#if IMU_HAS_DEVICE
+static void update_bias_candidate_from_sflp(const float value[3])
 {
 	int64_t now_us = k_ticks_to_us_floor64(k_uptime_ticks());
 
@@ -203,15 +233,83 @@ static void update_bias_candidate_from_sflp(const struct sensor_value value[3])
 
 	for(size_t i = 0; i < 3; ++i)
 	{
-		gyro_bias_candidate[i] = sensor_value_to_float_s(&value[i]);
+		gyro_bias_candidate[i] = value[i];
 	}
 	last_sflp_bias_update_us = now_us;
 }
+#endif
+
+#if IMU_HAS_DEVICE
+static uint32_t request_stream_restart(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&imu_stream_restart.lock);
+
+	++imu_stream_restart.requested_generation;
+	if(imu_stream_restart.requested_generation == 0U)
+	{
+		++imu_stream_restart.requested_generation;
+	}
+	uint32_t generation = imu_stream_restart.requested_generation;
+
+	k_spin_unlock(&imu_stream_restart.lock, key);
+	return generation;
+}
+
+static uint32_t pending_stream_restart(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&imu_stream_restart.lock);
+	uint32_t generation =
+	    imu_stream_restart.requested_generation != imu_stream_restart.completed_generation
+	        ? imu_stream_restart.requested_generation
+	        : 0U;
+
+	k_spin_unlock(&imu_stream_restart.lock, key);
+	return generation;
+}
+
+static void complete_stream_restart(uint32_t generation, int result)
+{
+	k_spinlock_key_t key = k_spin_lock(&imu_stream_restart.lock);
+
+	imu_stream_restart.completed_generation = generation;
+	imu_stream_restart.result = result;
+	k_spin_unlock(&imu_stream_restart.lock, key);
+	k_sem_give(&imu_stream_restart_done_sem);
+}
+
+static int wait_for_stream_restart(uint32_t generation)
+{
+	k_timepoint_t deadline = sys_timepoint_calc(K_MSEC(IMU_STREAM_RESTART_TIMEOUT_MS));
+
+	for(;;)
+	{
+		k_spinlock_key_t key = k_spin_lock(&imu_stream_restart.lock);
+
+		if(imu_stream_restart.completed_generation == generation)
+		{
+			int result = imu_stream_restart.result;
+
+			k_spin_unlock(&imu_stream_restart.lock, key);
+			return result;
+		}
+		k_spin_unlock(&imu_stream_restart.lock, key);
+
+		k_timeout_t timeout = sys_timepoint_timeout(deadline);
+
+		if(K_TIMEOUT_EQ(timeout, K_NO_WAIT) ||
+		   k_sem_take(&imu_stream_restart_done_sem, timeout) != 0)
+		{
+			return -ETIMEDOUT;
+		}
+	}
+}
+#endif
 
 static int program_gyro_bias(void)
 {
 #if IMU_HAS_DEVICE
 	struct sensor_value bias[3];
+	uint32_t restart_generation = 0U;
 	int err;
 
 	if(!device_is_ready(imu_dev))
@@ -219,13 +317,24 @@ static int program_gyro_bias(void)
 		return 0;
 	}
 
+	k_mutex_lock(&imu_bias_program_lock, K_FOREVER);
 	k_mutex_lock(&imu_io_lock, K_FOREVER);
 	for(size_t i = 0; i < 3; ++i)
 	{
 		(void)sensor_value_from_float(&bias[i], gyro_bias[i]);
 	}
-	err = sensor_attr_set(imu_dev, SENSOR_CHAN_GYRO_XYZ, SENSOR_ATTR_OFFSET, bias);
+	err = sensor_attr_set(imu_dev, SENSOR_CHAN_GBIAS_XYZ, SENSOR_ATTR_OFFSET, bias);
+	if(!err && atomic_get(&imu_stream_active) != 0)
+	{
+		restart_generation = request_stream_restart();
+	}
 	k_mutex_unlock(&imu_io_lock);
+
+	if(restart_generation != 0U)
+	{
+		err = wait_for_stream_restart(restart_generation);
+	}
+	k_mutex_unlock(&imu_bias_program_lock);
 
 	return err;
 #else
@@ -236,27 +345,16 @@ static int program_gyro_bias(void)
 static int set_motion_trigger_enabled(bool enabled)
 {
 #if IMU_HAS_DEVICE
-	int err;
-
-	if(!imu_trigger_ready || !device_is_ready(imu_dev))
-	{
-		return 0;
-	}
-	if(imu_motion_trigger_enabled == enabled)
-	{
-		return 0;
-	}
+	atomic_val_t previous;
 
 	k_mutex_lock(&imu_io_lock, K_FOREVER);
-	err = sensor_trigger_set(imu_dev, &imu_fifo_trigger, enabled ? imu_fifo_trigger_handler : NULL);
+	previous = atomic_set(&imu_motion_trigger_enabled, enabled ? 1 : 0);
 	k_mutex_unlock(&imu_io_lock);
-	if(err)
-	{
-		LOG_WRN("failed to %s IMU FIFO interrupt: %d", enabled ? "enable" : "disable", err);
-		return err;
-	}
 
-	imu_motion_trigger_enabled = enabled;
+	if(enabled && previous == 0)
+	{
+		k_sem_give(&imu_stream_start_sem);
+	}
 	return 0;
 #else
 	ARG_UNUSED(enabled);
@@ -362,8 +460,15 @@ static void load_persisted_settings(void)
 	}
 	if(load_setting_exact(IMU_GYRO_BIAS_PATH, loaded_bias, sizeof(loaded_bias)))
 	{
-		memcpy(gyro_bias, loaded_bias, sizeof(gyro_bias));
-		memcpy(gyro_bias_candidate, loaded_bias, sizeof(gyro_bias_candidate));
+		if(imu_gyro_bias_valid(loaded_bias))
+		{
+			memcpy(gyro_bias, loaded_bias, sizeof(gyro_bias));
+			memcpy(gyro_bias_candidate, loaded_bias, sizeof(gyro_bias_candidate));
+		}
+		else
+		{
+			LOG_WRN("ignoring invalid persisted gyro bias");
+		}
 	}
 	else
 	{
@@ -411,8 +516,11 @@ int imu_init(void)
 			LOG_WRN("failed to program gyro bias: %d", err);
 		}
 
-		imu_trigger_ready = true;
 		(void)set_motion_trigger_enabled(imu_enabled);
+		k_thread_create(&imu_stream_thread, imu_stream_stack,
+		                K_THREAD_STACK_SIZEOF(imu_stream_stack), imu_stream_thread_main, NULL, NULL,
+		                NULL, K_PRIO_PREEMPT(IMU_STREAM_THREAD_PRIORITY), K_FP_REGS, K_NO_WAIT);
+		(void)k_thread_name_set(&imu_stream_thread, "imu_stream");
 	}
 #else
 	LOG_WRN("no accel0 device-tree alias, reports will contain zeroes");
@@ -430,137 +538,334 @@ bool imu_ready(void)
 #endif
 }
 
-static int build_imu_report_from_sensor(struct controller_report *report)
-{
 #if IMU_HAS_DEVICE
-	struct sensor_value accel[3];
-	struct sensor_value gyro[3];
-	struct sensor_value sflp_bias[3];
-	struct sensor_value sflp_quat[4];
-	struct sensor_value timestamp;
-	float raw_gyro_rad_s[3];
-	float bias_rad_s[3];
-	float corrected_gyro_rad_s[3];
-	int16_t oriented[3];
+static int decode_latest_three_axis(const struct sensor_decoder_api *decoder, const uint8_t *buf,
+                                    enum sensor_channel channel, float value[3])
+{
+	struct sensor_chan_spec chan_spec = { channel, 0 };
+	struct sensor_decode_context ctx = SENSOR_DECODE_CONTEXT_INIT(decoder, buf, channel, 0);
+	struct sensor_three_axis_data data;
+	uint16_t frame_count;
 	int err;
 
-	if(!imu_enabled || !device_is_ready(imu_dev))
+	err = decoder->get_frame_count(buf, chan_spec, &frame_count);
+	if(err)
 	{
+		return err;
+	}
+	if(frame_count == 0)
+	{
+		return -ENODATA;
+	}
+
+	for(uint16_t i = 0; i < frame_count; ++i)
+	{
+		err = sensor_decode(&ctx, &data, 1);
+		if(err != 1)
+		{
+			return err < 0 ? err : -EIO;
+		}
+		for(size_t axis = 0; axis < 3; ++axis)
+		{
+			value[axis] = q31_to_float(data.readings[0].values[axis], data.shift);
+		}
+	}
+
+	return 0;
+}
+
+static int decode_latest_quaternion(const struct sensor_decoder_api *decoder, const uint8_t *buf,
+                                    float value[4])
+{
+	struct sensor_chan_spec chan_spec = { SENSOR_CHAN_GAME_ROTATION_VECTOR, 0 };
+	struct sensor_decode_context ctx =
+	    SENSOR_DECODE_CONTEXT_INIT(decoder, buf, SENSOR_CHAN_GAME_ROTATION_VECTOR, 0);
+	struct sensor_game_rotation_vector_data data;
+	uint16_t frame_count;
+	int err;
+
+	err = decoder->get_frame_count(buf, chan_spec, &frame_count);
+	if(err)
+	{
+		return err;
+	}
+	if(frame_count == 0)
+	{
+		return -ENODATA;
+	}
+
+	for(uint16_t i = 0; i < frame_count; ++i)
+	{
+		err = sensor_decode(&ctx, &data, 1);
+		if(err != 1)
+		{
+			return err < 0 ? err : -EIO;
+		}
+		for(size_t component = 0; component < 4; ++component)
+		{
+			value[component] = q31_to_float(data.readings[0].values[component], data.shift);
+		}
+	}
+
+	return 0;
+}
+
+static int decode_latest_fifo_timestamp(const struct sensor_decoder_api *decoder,
+                                        const uint8_t *buf, uint32_t *timestamp_us)
+{
+	struct sensor_chan_spec chan_spec = { SENSOR_CHAN_LSM6DSV16X_FIFO_TIMESTAMP, 0 };
+	struct sensor_decode_context ctx =
+	    SENSOR_DECODE_CONTEXT_INIT(decoder, buf, SENSOR_CHAN_LSM6DSV16X_FIFO_TIMESTAMP, 0);
+	struct sensor_uint64_data data;
+	uint16_t frame_count;
+	int err;
+
+	err = decoder->get_frame_count(buf, chan_spec, &frame_count);
+	if(err)
+	{
+		return err;
+	}
+	if(frame_count == 0)
+	{
+		return -ENODATA;
+	}
+
+	for(uint16_t i = 0; i < frame_count; ++i)
+	{
+		err = sensor_decode(&ctx, &data, 1);
+		if(err != 1)
+		{
+			return err < 0 ? err : -EIO;
+		}
+		*timestamp_us = (uint32_t)(data.readings[0].value * LSM6DSV16X_FIFO_TIMESTAMP_TICK_US);
+	}
+
+	return 0;
+}
+
+static int build_imu_report_from_stream(const uint8_t *buf)
+{
+	const struct sensor_decoder_api *decoder;
+	struct controller_report report = { 0 };
+	float accel[3];
+	float gyro[3];
+	float sflp_bias[3];
+	float quaternion[4];
+	float bias[3];
+	uint32_t timestamp_us = 0;
+	int16_t oriented[3];
+	bool updated = false;
+	bool reports_enabled;
+	int err;
+
+	err = sensor_get_decoder(imu_dev, &decoder);
+	if(err)
+	{
+		return err;
+	}
+
+	k_mutex_lock(&imu_io_lock, K_FOREVER);
+	reports_enabled = atomic_get(&imu_motion_trigger_enabled) != 0;
+	if(!reports_enabled)
+	{
+		k_mutex_unlock(&imu_io_lock);
 		return 0;
 	}
 
-	err = sensor_channel_get(imu_dev, SENSOR_CHAN_ACCEL_XYZ, accel);
-	if(err)
-	{
-		return err;
-	}
-	err = sensor_channel_get(imu_dev, SENSOR_CHAN_GYRO_XYZ, gyro);
-	if(err)
-	{
-		return err;
-	}
-
-	err = sensor_channel_get(imu_dev, (enum sensor_channel)LSM6DSV16X_SENSOR_CHAN_SFLP_GYRO_BIAS,
-	                         sflp_bias);
+	load_cached_imu_report(&report);
+	err = decode_latest_three_axis(decoder, buf, SENSOR_CHAN_GBIAS_XYZ, sflp_bias);
 	if(err == 0)
 	{
+		memcpy(latest_sflp_bias, sflp_bias, sizeof(latest_sflp_bias));
+		latest_sflp_bias_valid = true;
 		update_bias_candidate_from_sflp(sflp_bias);
+		updated = true;
+	}
+
+	err = decode_latest_three_axis(decoder, buf, SENSOR_CHAN_ACCEL_XYZ, accel);
+	if(err == 0)
+	{
+		oriented[0] = accel_axis_to_report(accel[0]);
+		oriented[1] = accel_axis_to_report(accel[1]);
+		oriented[2] = accel_axis_to_report(accel[2]);
+		apply_orientation_i16(oriented);
+		report.accel_x = oriented[0];
+		report.accel_y = oriented[1];
+		report.accel_z = oriented[2];
+		updated = true;
+	}
+
+	err = decode_latest_three_axis(decoder, buf, SENSOR_CHAN_GYRO_XYZ, gyro);
+	if(err == 0)
+	{
+		memcpy(bias, latest_sflp_bias_valid ? latest_sflp_bias : gyro_bias, sizeof(bias));
+		oriented[0] = gyro_axis_to_report(gyro[0] - bias[0]);
+		oriented[1] = gyro_axis_to_report(gyro[1] - bias[1]);
+		oriented[2] = gyro_axis_to_report(gyro[2] - bias[2]);
+		apply_orientation_i16(oriented);
 		for(size_t i = 0; i < 3; ++i)
 		{
-			bias_rad_s[i] = sensor_value_to_float_s(&sflp_bias[i]);
+			if(-gyro_dz_threshold < oriented[i] && gyro_dz_threshold > oriented[i])
+			{
+				oriented[i] = 0;
+			}
 		}
-	}
-	else
-	{
-		memcpy(bias_rad_s, gyro_bias, sizeof(bias_rad_s));
-	}
-
-	for(size_t i = 0; i < 3; ++i)
-	{
-		raw_gyro_rad_s[i] = sensor_value_to_float_s(&gyro[i]);
-		corrected_gyro_rad_s[i] = raw_gyro_rad_s[i] - bias_rad_s[i];
+		report.gyro_x = oriented[0];
+		report.gyro_y = oriented[1];
+		report.gyro_z = oriented[2];
+		updated = true;
 	}
 
-	oriented[0] = accel_axis_to_report(&accel[0]);
-	oriented[1] = accel_axis_to_report(&accel[1]);
-	oriented[2] = accel_axis_to_report(&accel[2]);
-	apply_orientation_i16(oriented);
-	report->accel_x = oriented[0];
-	report->accel_y = oriented[1];
-	report->accel_z = oriented[2];
-
-	oriented[0] = gyro_axis_to_report(corrected_gyro_rad_s[0]);
-	oriented[1] = gyro_axis_to_report(corrected_gyro_rad_s[1]);
-	oriented[2] = gyro_axis_to_report(corrected_gyro_rad_s[2]);
-	apply_orientation_i16(oriented);
-	for(size_t i = 0; i < 3; ++i)
-	{
-		if(-gyro_dz_threshold < oriented[i] && gyro_dz_threshold > oriented[i])
-		{
-			oriented[i] = 0;
-		}
-	}
-	report->gyro_x = oriented[0];
-	report->gyro_y = oriented[1];
-	report->gyro_z = oriented[2];
-
-	err = sensor_channel_get(
-	    imu_dev, (enum sensor_channel)LSM6DSV16X_SENSOR_CHAN_SFLP_GAME_ROTATION_VECTOR, sflp_quat);
+	err = decode_latest_quaternion(decoder, buf, quaternion);
 	if(err == 0)
 	{
-		fill_quaternion_report(report, sflp_quat);
+		fill_quaternion_report(&report, quaternion);
+		updated = true;
 	}
-	else
-	{
-		fill_identity_quaternion_report(report);
-	}
-
-	err = sensor_channel_get(imu_dev, (enum sensor_channel)LSM6DSV16X_SENSOR_CHAN_TIMESTAMP,
-	                         &timestamp);
+	err = decode_latest_fifo_timestamp(decoder, buf, &timestamp_us);
 	if(err == 0)
 	{
-		report->imu_timestamp_us = (uint32_t)timestamp.val1;
+		report.imu_timestamp_us = timestamp_us;
 	}
-
-	return 0;
-#else
-	ARG_UNUSED(report);
-	return 0;
-#endif
-}
-
-#if IMU_HAS_DEVICE
-static void imu_fifo_trigger_handler(const struct device *dev, const struct sensor_trigger *trigger)
-{
-	struct controller_report report = { 0 };
-	int err;
-
-	ARG_UNUSED(trigger);
-
-	if(!imu_enabled)
+	if(updated)
 	{
-		return;
-	}
-	k_mutex_lock(&imu_io_lock, K_FOREVER);
-	err = sensor_sample_fetch_chan(dev, (enum sensor_channel)LSM6DSV16X_SENSOR_CHAN_FIFO);
-	if(err == 0 && imu_enabled)
-	{
-		err = build_imu_report_from_sensor(&report);
+		store_cached_imu_report(&report);
+		k_mutex_unlock(&imu_io_lock);
+		return 0;
 	}
 	k_mutex_unlock(&imu_io_lock);
-
-	if(err)
-	{
-		LOG_DBG("failed to update IMU report: %d", err);
-		return;
-	}
-	if(!imu_enabled)
-	{
-		return;
-	}
-
-	store_cached_imu_report(&report);
+	return -ENODATA;
 }
+
+static void imu_stream_thread_main(void *arg1, void *arg2, void *arg3)
+{
+	bool initial_stream_attempted = false;
+	uint32_t retry_ms = IMU_STREAM_RETRY_INITIAL_MS;
+
+	ARG_UNUSED(arg1);
+	ARG_UNUSED(arg2);
+	ARG_UNUSED(arg3);
+
+	for(;;)
+	{
+		struct rtio_sqe *stream_handle = NULL;
+		uint32_t restart_generation;
+		bool cancel_pending = false;
+		int err;
+
+		/*
+		 * Configure the stream once even when reports start disabled. OFW removes
+		 * only its report trigger, leaving the sensor and SFLP running so fusion
+		 * state remains warm across a later re-enable.
+		 */
+		while(initial_stream_attempted &&
+		      atomic_get(&imu_motion_trigger_enabled) == 0 &&
+		      pending_stream_restart() == 0U)
+		{
+			k_sem_take(&imu_stream_start_sem, K_FOREVER);
+		}
+
+		initial_stream_attempted = true;
+		k_mutex_lock(&imu_io_lock, K_FOREVER);
+		restart_generation = pending_stream_restart();
+		err = sensor_stream(&imu_stream_iodev, &imu_stream_rtio, NULL, &stream_handle);
+		if(!err)
+		{
+			atomic_set(&imu_stream_active, 1);
+		}
+		k_mutex_unlock(&imu_io_lock);
+		if(restart_generation != 0U)
+		{
+			/* Report the first replacement attempt; recovery remains independent. */
+			complete_stream_restart(restart_generation, err);
+		}
+		if(err)
+		{
+			LOG_WRN("failed to start IMU FIFO stream: %d", err);
+			if(atomic_get(&imu_motion_trigger_enabled) == 0 && pending_stream_restart() == 0U)
+			{
+				retry_ms = IMU_STREAM_RETRY_INITIAL_MS;
+				continue;
+			}
+			k_msleep(retry_ms);
+			retry_ms = MIN(retry_ms * 2U, IMU_STREAM_RETRY_MAX_MS);
+			continue;
+		}
+		for(;;)
+		{
+			struct rtio_cqe *cqe = rtio_cqe_consume_block(&imu_stream_rtio);
+			uint8_t *buf = NULL;
+			uint32_t buf_len = 0;
+			int stream_result = cqe->result;
+			int result = stream_result;
+
+			if(result == 0)
+			{
+				result = rtio_cqe_get_mempool_buffer(&imu_stream_rtio, cqe, &buf, &buf_len);
+				if(result == 0 && (buf == NULL || buf_len == 0))
+				{
+					result = -ENODATA;
+				}
+			}
+			rtio_cqe_release(&imu_stream_rtio, cqe);
+
+			if(result == 0)
+			{
+				err = build_imu_report_from_stream(buf);
+				if(err && err != -ENODATA)
+				{
+					LOG_DBG("failed to decode IMU FIFO stream: %d", err);
+				}
+				rtio_release_buffer(&imu_stream_rtio, buf, buf_len);
+				retry_ms = IMU_STREAM_RETRY_INITIAL_MS;
+			}
+			else if(stream_result == 0)
+			{
+				/* An empty success does not terminate the live multishot request. */
+				LOG_DBG("IMU FIFO stream completed without data: %d", result);
+			}
+
+			if(stream_result < 0)
+			{
+				atomic_set(&imu_stream_active, 0);
+				if(stream_result != -ECANCELED)
+				{
+					LOG_WRN("IMU FIFO stream stopped: %d", stream_result);
+				}
+				break;
+			}
+			if(!cancel_pending &&
+			   (atomic_get(&imu_motion_trigger_enabled) == 0 || pending_stream_restart() != 0U))
+			{
+				/*
+				 * This private RTIO has one SQE, and this thread does not reacquire it
+				 * until the terminal CQE is consumed below.
+				 */
+				err = rtio_sqe_cancel(stream_handle);
+				if(err)
+				{
+					LOG_WRN("failed to stop IMU FIFO stream: %d", err);
+				}
+				else
+				{
+					cancel_pending = true;
+				}
+			}
+		}
+
+		if(pending_stream_restart() != 0U ||
+		   atomic_get(&imu_motion_trigger_enabled) == 0 ||
+		   cancel_pending)
+		{
+			retry_ms = IMU_STREAM_RETRY_INITIAL_MS;
+			continue;
+		}
+
+		k_msleep(retry_ms);
+		retry_ms = MIN(retry_ms * 2U, IMU_STREAM_RETRY_MAX_MS);
+	}
+}
+
 #endif
 
 int imu_read_report(struct controller_report *report)
@@ -655,6 +960,7 @@ bool imu_settings_read(const char *path, uint8_t *buf, size_t capacity, size_t *
 
 int imu_settings_stage(const char *path, const uint8_t *value, size_t len)
 {
+	float received_bias[3];
 	int err;
 
 	if(strcmp(path, IMU_MODE_PATH) == 0)
@@ -697,8 +1003,13 @@ int imu_settings_stage(const char *path, const uint8_t *value, size_t len)
 		{
 			return -EINVAL;
 		}
+		memcpy(received_bias, value, sizeof(received_bias));
+		if(!imu_gyro_bias_valid(received_bias))
+		{
+			return -ERANGE;
+		}
 		k_mutex_lock(&imu_io_lock, K_FOREVER);
-		memcpy(staged_gyro_bias, value, sizeof(staged_gyro_bias));
+		memcpy(staged_gyro_bias, received_bias, sizeof(staged_gyro_bias));
 		memcpy(gyro_bias, staged_gyro_bias, sizeof(gyro_bias));
 		memcpy(gyro_bias_candidate, gyro_bias, sizeof(gyro_bias_candidate));
 		gyro_bias_dirty = true;

@@ -291,7 +291,7 @@ static int save_setting(const char *path, const void *value, size_t len)
 int calibration_import_valve_storage(void)
 {
 	const struct flash_area *fa;
-	int err = flash_area_open(FLASH_AREA_ID(valve_storage), &fa);
+	int err = flash_area_open(FIXED_PARTITION_ID(valve_storage), &fa);
 
 	if(err)
 	{

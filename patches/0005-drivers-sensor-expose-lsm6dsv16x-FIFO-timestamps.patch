@@ -1,0 +1,330 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SC26re user <@>
+Date: Thu, 23 Jul 2026 00:00:11 +0200
+Subject: [PATCH] drivers: sensor: expose lsm6dsv16x FIFO timestamps
+
+
+diff --git a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.c b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.c
+index e7402090825..cf84db03b78 100644
+--- a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.c
++++ b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.c
+@@ -1429,6 +1429,14 @@ static int lsm6dsv16x_init_chip(const struct device *dev)
+ 		return -EIO;
+ 	}
+ 
++#ifdef CONFIG_LSM6DSV16X_STREAM
++	/* Keep the hardware clock running independently of FIFO stream requests. */
++	if (lsm6dsv16x_timestamp_set(ctx, 1) < 0) {
++		LOG_DBG("failed to enable timestamp counter");
++		return -EIO;
++	}
++#endif
++
+ 	return 0;
+ }
+ 
+diff --git a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_decoder.c b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_decoder.c
+index 9859708b609..a351bd75435 100644
+--- a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_decoder.c
++++ b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_decoder.c
+@@ -9,6 +9,8 @@
+ #include "lsm6dsv16x.h"
+ #include "lsm6dsv16x_decoder.h"
+ #include <zephyr/dt-bindings/sensor/lsm6dsv16x.h>
++#include <zephyr/drivers/sensor/lsm6dsv16x.h>
++#include <zephyr/sys/byteorder.h>
+ 
+ #include <zephyr/logging/log.h>
+ LOG_MODULE_REGISTER(LSM6DSV16X_DECODER, CONFIG_SENSOR_LOG_LEVEL);
+@@ -193,6 +195,7 @@ static int lsm6dsv16x_decoder_get_frame_count(const uint8_t *buffer,
+ 	uint8_t fifo_tag;
+ 	uint8_t tot_accel_fifo_words = 0, tot_gyro_fifo_words = 0;
+ 	uint8_t tot_sflp_gbias = 0, tot_sflp_gravity = 0, tot_sflp_game_rotation = 0;
++	uint16_t tot_timestamp_fifo_words = 0;
+ 
+ #if defined(CONFIG_LSM6DSV16X_ENABLE_TEMP)
+ 	uint8_t tot_temp_fifo_words = 0;
+@@ -212,6 +215,9 @@ static int lsm6dsv16x_decoder_get_frame_count(const uint8_t *buffer,
+ 		case LSM6DSV16X_GY_NC_TAG:
+ 			tot_gyro_fifo_words++;
+ 			break;
++		case LSM6DSV16X_TIMESTAMP_TAG:
++			tot_timestamp_fifo_words++;
++			break;
+ #if defined(CONFIG_LSM6DSV16X_ENABLE_TEMP)
+ 		case LSM6DSV16X_TEMPERATURE_TAG:
+ 			tot_temp_fifo_words++;
+@@ -262,6 +268,9 @@ static int lsm6dsv16x_decoder_get_frame_count(const uint8_t *buffer,
+ 	case SENSOR_CHAN_GBIAS_XYZ:
+ 		*frame_count = tot_sflp_gbias;
+ 		break;
++	case SENSOR_CHAN_LSM6DSV16X_FIFO_TIMESTAMP:
++		*frame_count = tot_timestamp_fifo_words;
++		break;
+ 	default:
+ 		*frame_count = 0;
+ 		break;
+@@ -323,6 +332,9 @@ static int lsm6dsv16x_decode_fifo(const uint8_t *buffer, struct sensor_chan_spec
+ 		((struct sensor_data_header *)data_out)->base_timestamp_ns =
+ 			edata->header.timestamp -
+ 			(tot_chan_fifo_words - 1) * sflp_period_ns[edata->sflp_batch_odr];
++	} else if (chan_spec.chan_type == SENSOR_CHAN_LSM6DSV16X_FIFO_TIMESTAMP) {
++		((struct sensor_uint64_data *)data_out)->header.base_timestamp_ns =
++			edata->header.timestamp;
+ 	}
+ 
+ 	while (count < max_count && buffer < buffer_end) {
+@@ -397,6 +409,24 @@ static int lsm6dsv16x_decode_fifo(const uint8_t *buffer, struct sensor_chan_spec
+ 			out->readings[count].z = Q31_SHIFT_MICROVAL(scale * z, out->shift);
+ 			break;
+ 		}
++		case LSM6DSV16X_TIMESTAMP_TAG: {
++			struct sensor_uint64_data *out = data_out;
++
++			if ((uintptr_t)buffer < *fit) {
++				/* This frame was already decoded, move on to the next frame */
++				buffer = frame_end;
++				continue;
++			}
++
++			if (chan_spec.chan_type != SENSOR_CHAN_LSM6DSV16X_FIFO_TIMESTAMP) {
++				buffer = frame_end;
++				continue;
++			}
++
++			out->readings[count].timestamp_delta = 0;
++			out->readings[count].value = sys_get_le32(&buffer[1]);
++			break;
++		}
+ #if defined(CONFIG_LSM6DSV16X_ENABLE_TEMP)
+ 		case LSM6DSV16X_TEMPERATURE_TAG: {
+ 			struct sensor_q31_data *out = data_out;
+@@ -559,6 +589,10 @@ static int lsm6dsv16x_decode_fifo(const uint8_t *buffer, struct sensor_chan_spec
+ 		count++;
+ 	}
+ 
++	if (chan_spec.chan_type == SENSOR_CHAN_LSM6DSV16X_FIFO_TIMESTAMP) {
++		((struct sensor_uint64_data *)data_out)->header.reading_count = count;
++	}
++
+ 	return count;
+ }
+ #endif /* CONFIG_LSM6DSV16X_STREAM */
+@@ -685,6 +719,10 @@ static int lsm6dsv16x_decoder_get_size_info(struct sensor_chan_spec chan_spec, s
+ 		*base_size = sizeof(struct sensor_q31_data);
+ 		*frame_size = sizeof(struct sensor_q31_sample_data);
+ 		return 0;
++	case SENSOR_CHAN_LSM6DSV16X_FIFO_TIMESTAMP:
++		*base_size = sizeof(struct sensor_uint64_data);
++		*frame_size = sizeof(struct sensor_uint64_sample_data);
++		return 0;
+ 	default:
+ 		return -ENOTSUP;
+ 	}
+diff --git a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_rtio_stream.c b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_rtio_stream.c
+index 33eda714156..1706fa244ad 100644
+--- a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_rtio_stream.c
++++ b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_rtio_stream.c
+@@ -130,6 +130,7 @@ static void lsm6dsv16x_config_fifo(const struct device *dev, struct trigger_conf
+ 	lsm6dsv16x_fifo_xl_batch_t xl_batch = LSM6DSVXXX_DT_XL_NOT_BATCHED;
+ 	lsm6dsv16x_fifo_gy_batch_t gy_batch = LSM6DSVXXX_DT_GY_NOT_BATCHED;
+ 	lsm6dsv16x_fifo_temp_batch_t temp_batch = LSM6DSVXXX_DT_TEMP_NOT_BATCHED;
++	lsm6dsv16x_fifo_timestamp_batch_t timestamp_batch = LSM6DSV16X_TMSTMP_NOT_BATCHED;
+ 	lsm6dsv16x_fifo_mode_t fifo_mode = LSM6DSV16X_BYPASS_MODE;
+ 	lsm6dsv16x_sflp_data_rate_t sflp_odr = LSM6DSV16X_SFLP_120Hz;
+ 	lsm6dsv16x_fifo_sflp_raw_t sflp_fifo = { 0 };
+@@ -151,6 +152,7 @@ static void lsm6dsv16x_config_fifo(const struct device *dev, struct trigger_conf
+ 
+ 		fifo_mode = LSM6DSV16X_STREAM_MODE;
+ 		fifo_wtm = config->fifo_wtm;
++		timestamp_batch = LSM6DSV16X_TMSTMP_DEC_1;
+ 
+ 		if (config->sflp_fifo_en & LSM6DSVXXX_DT_SFLP_FIFO_GAME_ROTATION) {
+ 			sflp_fifo.game_rotation = 1;
+@@ -181,6 +183,7 @@ static void lsm6dsv16x_config_fifo(const struct device *dev, struct trigger_conf
+ 	lsm6dsv16x->accel_batch_odr = xl_batch;
+ 	lsm6dsv16x_fifo_gy_batch_set(ctx, gy_batch);
+ 	lsm6dsv16x->gyro_batch_odr = gy_batch;
++	lsm6dsv16x_fifo_timestamp_batch_set(ctx, timestamp_batch);
+ #if defined(CONFIG_LSM6DSV16X_ENABLE_TEMP)
+ 	lsm6dsv16x_fifo_temp_batch_set(ctx, temp_batch);
+ 	lsm6dsv16x->temp_batch_odr = temp_batch;
+diff --git a/include/zephyr/drivers/sensor/lsm6dsv16x.h b/include/zephyr/drivers/sensor/lsm6dsv16x.h
+new file mode 100644
+index 00000000000..2c80b3720e1
+--- /dev/null
++++ b/include/zephyr/drivers/sensor/lsm6dsv16x.h
+@@ -0,0 +1,34 @@
++/* ST Microelectronics LSM6DSV16X 6-axis IMU sensor driver
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#ifndef ZEPHYR_INCLUDE_DRIVERS_SENSOR_LSM6DSV16X_H_
++#define ZEPHYR_INCLUDE_DRIVERS_SENSOR_LSM6DSV16X_H_
++
++#include <zephyr/drivers/sensor.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/** Duration of one tick of the LSM6DSV16X hardware timestamp counter. */
++#define LSM6DSV16X_FIFO_TIMESTAMP_TICK_US 21U
++
++/** Custom sensor channels for the LSM6DSV16X. */
++enum sensor_channel_lsm6dsv16x {
++	/**
++	 * Raw 32-bit hardware timestamp values carried by FIFO timestamp tags.
++	 *
++	 * The asynchronous decoder returns these as sensor_uint64_data readings.
++	 * Multiply each value by LSM6DSV16X_FIFO_TIMESTAMP_TICK_US to obtain
++	 * microseconds, with the desired output width determining wrap behavior.
++	 */
++	SENSOR_CHAN_LSM6DSV16X_FIFO_TIMESTAMP = SENSOR_CHAN_PRIV_START,
++};
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* ZEPHYR_INCLUDE_DRIVERS_SENSOR_LSM6DSV16X_H_ */
+diff --git a/tests/drivers/sensor/lsm6dsv16x_stream/src/lsm6dsv16x_emul.c b/tests/drivers/sensor/lsm6dsv16x_stream/src/lsm6dsv16x_emul.c
+index e88439952bc..4259cc3eb9a 100644
+--- a/tests/drivers/sensor/lsm6dsv16x_stream/src/lsm6dsv16x_emul.c
++++ b/tests/drivers/sensor/lsm6dsv16x_stream/src/lsm6dsv16x_emul.c
+@@ -167,3 +167,8 @@ uint32_t lsm6dsv16x_emul_read_count(uint8_t reg)
+ {
+ 	return emul_data.read_count[reg];
+ }
++
++uint8_t lsm6dsv16x_emul_register_get(uint8_t reg)
++{
++	return emul_data.registers[BANK_MAIN][reg];
++}
+diff --git a/tests/drivers/sensor/lsm6dsv16x_stream/src/lsm6dsv16x_emul.h b/tests/drivers/sensor/lsm6dsv16x_stream/src/lsm6dsv16x_emul.h
+index db8b855bc9f..c76c28f1d4b 100644
+--- a/tests/drivers/sensor/lsm6dsv16x_stream/src/lsm6dsv16x_emul.h
++++ b/tests/drivers/sensor/lsm6dsv16x_stream/src/lsm6dsv16x_emul.h
+@@ -9,5 +9,6 @@ void lsm6dsv16x_emul_set_fifo_empty(void);
+ void lsm6dsv16x_emul_fail_next_read(uint8_t reg, int error, uint8_t fill);
+ void lsm6dsv16x_emul_clear_read_counts(void);
+ uint32_t lsm6dsv16x_emul_read_count(uint8_t reg);
++uint8_t lsm6dsv16x_emul_register_get(uint8_t reg);
+ 
+ #endif /* ZEPHYR_TESTS_DRIVERS_SENSOR_LSM6DSV16X_STREAM_EMUL_H_ */
+diff --git a/tests/drivers/sensor/lsm6dsv16x_stream/src/main.c b/tests/drivers/sensor/lsm6dsv16x_stream/src/main.c
+index 20d42eb8984..8ad60b0f6e0 100644
+--- a/tests/drivers/sensor/lsm6dsv16x_stream/src/main.c
++++ b/tests/drivers/sensor/lsm6dsv16x_stream/src/main.c
+@@ -7,6 +7,7 @@
+ #include <zephyr/drivers/gpio.h>
+ #include <zephyr/drivers/gpio/gpio_emul.h>
+ #include <zephyr/drivers/sensor.h>
++#include <zephyr/drivers/sensor/lsm6dsv16x.h>
+ #include <zephyr/kernel.h>
+ #include <zephyr/rtio/rtio.h>
+ #include <zephyr/ztest.h>
+@@ -14,9 +15,15 @@
+ #include "lsm6dsv16x_decoder.h"
+ 
+ #define SENSOR_NODE           DT_NODELABEL(lsm6dsv16x)
++#define REG_FIFO_CTRL4        0x0a
+ #define REG_FIFO_STATUS1      0x1b
++#define REG_FUNCTIONS_ENABLE  0x50
+ #define REG_FIFO_DATA_OUT_TAG 0x78
+ 
++#define FIFO_TIMESTAMP_DECIMATION_MASK GENMASK(7, 6)
++#define FIFO_TIMESTAMP_DECIMATE_1      BIT(6)
++#define TIMESTAMP_ENABLE               BIT(6)
++
+ static const struct device *const sensor = DEVICE_DT_GET(SENSOR_NODE);
+ static const struct gpio_dt_spec interrupt = GPIO_DT_SPEC_GET(SENSOR_NODE, int1_gpios);
+ 
+@@ -24,6 +31,10 @@ static const uint8_t fifo_payload[7] = {
+ 	0x08, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+ };
+ 
++static const uint8_t fifo_timestamp_payload[7] = {
++	0x20, 0x78, 0x56, 0x34, 0x12, 0x00, 0x00,
++};
++
+ SENSOR_DT_STREAM_IODEV(stream_iodev, SENSOR_NODE,
+ 		       {SENSOR_TRIG_FIFO_WATERMARK, SENSOR_STREAM_DATA_INCLUDE});
+ SENSOR_DT_STREAM_IODEV(mixed_stream_iodev, SENSOR_NODE,
+@@ -97,7 +108,7 @@ static void expect_error(int error)
+ 	expect_no_completion();
+ }
+ 
+-static uint8_t *expect_success(uint32_t *buf_len)
++static uint8_t *expect_success_payload(const uint8_t payload[7], uint32_t *buf_len)
+ {
+ 	struct rtio_cqe cqe = get_completion();
+ 	uint8_t *buf = NULL;
+@@ -111,10 +122,15 @@ static uint8_t *expect_success(uint32_t *buf_len)
+ 
+ 	zassert_true(fifo->header.is_fifo);
+ 	zassert_equal(1, fifo->fifo_count);
+-	zassert_mem_equal(buf + sizeof(*fifo), fifo_payload, sizeof(fifo_payload));
++	zassert_mem_equal(buf + sizeof(*fifo), payload, sizeof(fifo_payload));
+ 	return buf;
+ }
+ 
++static uint8_t *expect_success(uint32_t *buf_len)
++{
++	return expect_success_payload(fifo_payload, buf_len);
++}
++
+ static void stop_stream(struct rtio_sqe *handle)
+ {
+ 	/* Complete the canceled shot without allocating another receive buffer. */
+@@ -224,11 +240,49 @@ ZTEST(lsm6dsv16x_stream, test_mixed_fifo_and_drdy_is_rejected_without_leaking_st
+ 	stop_stream(recovery);
+ }
+ 
++ZTEST(lsm6dsv16x_stream, test_hardware_fifo_timestamp_is_configured_and_decoded)
++{
++	struct rtio_sqe *handle = start_stream();
++	const struct sensor_decoder_api *decoder;
++	struct sensor_uint64_data timestamp_data;
++	struct sensor_chan_spec timestamp_channel = {
++		.chan_type = SENSOR_CHAN_LSM6DSV16X_FIFO_TIMESTAMP,
++		.chan_idx = 0,
++	};
++	uint16_t frame_count;
++	uint32_t buf_len;
++
++	zassert_equal(FIFO_TIMESTAMP_DECIMATE_1, lsm6dsv16x_emul_register_get(REG_FIFO_CTRL4) &
++							 FIFO_TIMESTAMP_DECIMATION_MASK);
++	zassert_not_equal(0, lsm6dsv16x_emul_register_get(REG_FUNCTIONS_ENABLE) & TIMESTAMP_ENABLE);
++
++	lsm6dsv16x_emul_set_fifo(fifo_timestamp_payload);
++	pulse_interrupt();
++	uint8_t *buf = expect_success_payload(fifo_timestamp_payload, &buf_len);
++
++	zassert_ok(sensor_get_decoder(sensor, &decoder));
++	zassert_ok(decoder->get_frame_count(buf, timestamp_channel, &frame_count));
++	zassert_equal(1, frame_count);
++
++	struct sensor_decode_context ctx =
++		SENSOR_DECODE_CONTEXT_INIT(decoder, buf, SENSOR_CHAN_LSM6DSV16X_FIFO_TIMESTAMP, 0);
++
++	zassert_equal(1, sensor_decode(&ctx, &timestamp_data, 1));
++	zassert_equal(1, timestamp_data.header.reading_count);
++	zassert_equal(UINT32_C(0x12345678), timestamp_data.readings[0].value);
++	zassert_equal(0, sensor_decode(&ctx, &timestamp_data, 1));
++
++	rtio_release_buffer(&stream_ctx, buf, buf_len);
++	stop_stream(handle);
++}
++
+ static void *lsm6dsv16x_stream_setup(void)
+ {
+ 	zassert_true(device_is_ready(sensor), "sensor failed to initialize");
+ 	zassert_true(gpio_is_ready_dt(&interrupt));
+ 	zassert_ok(gpio_emul_input_set_dt(&interrupt, 0));
++	zassert_not_equal(0,
++			  lsm6dsv16x_emul_register_get(REG_FUNCTIONS_ENABLE) & TIMESTAMP_ENABLE);
+ 	return NULL;
+ }
+ 

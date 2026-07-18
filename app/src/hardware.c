@@ -31,64 +31,64 @@ struct hardware_button
 	  .report_mask = BIT(CONTROLLER_BUTTON_##name) }
 
 static const struct hardware_button buttons[] = {
-#if DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(button_a))
+#if DT_NODE_HAS_STATUS(DT_ALIAS(button_a), okay)
 	BUTTON_ENTRY(button_a, A),
 #endif
-#if DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(button_b))
+#if DT_NODE_HAS_STATUS(DT_ALIAS(button_b), okay)
 	BUTTON_ENTRY(button_b, B),
 #endif
-#if DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(button_x))
+#if DT_NODE_HAS_STATUS(DT_ALIAS(button_x), okay)
 	BUTTON_ENTRY(button_x, X),
 #endif
-#if DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(button_y))
+#if DT_NODE_HAS_STATUS(DT_ALIAS(button_y), okay)
 	BUTTON_ENTRY(button_y, Y),
 #endif
-#if DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(button_qam))
+#if DT_NODE_HAS_STATUS(DT_ALIAS(button_qam), okay)
 	BUTTON_ENTRY(button_qam, QAM),
 #endif
-#if DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(button_right_stick))
+#if DT_NODE_HAS_STATUS(DT_ALIAS(button_right_stick), okay)
 	BUTTON_ENTRY(button_right_stick, RIGHT_STICK),
 #endif
-#if DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(button_view))
+#if DT_NODE_HAS_STATUS(DT_ALIAS(button_view), okay)
 	BUTTON_ENTRY(button_view, VIEW),
 #endif
-#if DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(button_right_paddle1))
+#if DT_NODE_HAS_STATUS(DT_ALIAS(button_right_paddle1), okay)
 	BUTTON_ENTRY(button_right_paddle1, RIGHT_PADDLE1),
 #endif
-#if DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(button_right_paddle2))
+#if DT_NODE_HAS_STATUS(DT_ALIAS(button_right_paddle2), okay)
 	BUTTON_ENTRY(button_right_paddle2, RIGHT_PADDLE2),
 #endif
-#if DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(button_right_shoulder))
+#if DT_NODE_HAS_STATUS(DT_ALIAS(button_right_shoulder), okay)
 	BUTTON_ENTRY(button_right_shoulder, RIGHT_SHOULDER),
 #endif
-#if DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(button_dpad_down))
+#if DT_NODE_HAS_STATUS(DT_ALIAS(button_dpad_down), okay)
 	BUTTON_ENTRY(button_dpad_down, DPAD_DOWN),
 #endif
-#if DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(button_dpad_right))
+#if DT_NODE_HAS_STATUS(DT_ALIAS(button_dpad_right), okay)
 	BUTTON_ENTRY(button_dpad_right, DPAD_RIGHT),
 #endif
-#if DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(button_dpad_left))
+#if DT_NODE_HAS_STATUS(DT_ALIAS(button_dpad_left), okay)
 	BUTTON_ENTRY(button_dpad_left, DPAD_LEFT),
 #endif
-#if DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(button_dpad_up))
+#if DT_NODE_HAS_STATUS(DT_ALIAS(button_dpad_up), okay)
 	BUTTON_ENTRY(button_dpad_up, DPAD_UP),
 #endif
-#if DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(button_menu))
+#if DT_NODE_HAS_STATUS(DT_ALIAS(button_menu), okay)
 	BUTTON_ENTRY(button_menu, MENU),
 #endif
-#if DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(button_left_stick))
+#if DT_NODE_HAS_STATUS(DT_ALIAS(button_left_stick), okay)
 	BUTTON_ENTRY(button_left_stick, LEFT_STICK),
 #endif
-#if DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(button_steam))
+#if DT_NODE_HAS_STATUS(DT_ALIAS(button_steam), okay)
 	BUTTON_ENTRY(button_steam, STEAM),
 #endif
-#if DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(button_left_paddle1))
+#if DT_NODE_HAS_STATUS(DT_ALIAS(button_left_paddle1), okay)
 	BUTTON_ENTRY(button_left_paddle1, LEFT_PADDLE1),
 #endif
-#if DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(button_left_paddle2))
+#if DT_NODE_HAS_STATUS(DT_ALIAS(button_left_paddle2), okay)
 	BUTTON_ENTRY(button_left_paddle2, LEFT_PADDLE2),
 #endif
-#if DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(button_left_shoulder))
+#if DT_NODE_HAS_STATUS(DT_ALIAS(button_left_shoulder), okay)
 	BUTTON_ENTRY(button_left_shoulder, LEFT_SHOULDER),
 #endif
 };

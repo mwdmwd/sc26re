@@ -1,0 +1,166 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SC26re user <@>
+Date: Thu, 23 Jul 2026 01:05:00 +0200
+Subject: [PATCH] drivers: sensor: reconfigure lsm6dsv16x FIFO after bias
+ changes
+
+
+diff --git a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.h b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.h
+index 6fa09aed4f0..390632b2afe 100644
+--- a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.h
++++ b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.h
+@@ -14,6 +14,7 @@
+ #include <zephyr/drivers/sensor.h>
+ #include <zephyr/types.h>
+ #include <zephyr/drivers/gpio.h>
++#include <zephyr/sys/atomic.h>
+ #include <zephyr/sys/util.h>
+ #include <stmemsc.h>
+ #include "lsm6dsv16x_reg.h"
+@@ -183,6 +184,7 @@ struct lsm6dsv16x_data {
+ 	int32_t gbias_x_udps;
+ 	int32_t gbias_y_udps;
+ 	int32_t gbias_z_udps;
++	atomic_t fifo_config_dirty;
+ #endif
+ 
+ #ifdef CONFIG_LSM6DSV16X_TRIGGER
+diff --git a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_rtio_stream.c b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_rtio_stream.c
+index 1706fa244ad..8cb37c220b6 100644
+--- a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_rtio_stream.c
++++ b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_rtio_stream.c
+@@ -92,6 +92,7 @@ int lsm6dsv16x_gbias_config(const struct device *dev, enum sensor_channel chan,
+ 		lsm6dsv16x->gbias_x_udps = 10 * sensor_rad_to_10udegrees(&val[0]);
+ 		lsm6dsv16x->gbias_y_udps = 10 * sensor_rad_to_10udegrees(&val[1]);
+ 		lsm6dsv16x->gbias_z_udps = 10 * sensor_rad_to_10udegrees(&val[2]);
++		atomic_set(&lsm6dsv16x->fifo_config_dirty, 1);
+ 		break;
+ 	default:
+ 		LOG_DBG("Accel attribute not supported.");
+@@ -259,6 +260,7 @@ void lsm6dsv16x_submit_stream(const struct device *dev, struct rtio_iodev_sqe *i
+ #endif
+ 	const struct sensor_read_config *cfg = iodev_sqe->sqe.iodev->data;
+ 	struct trigger_config trig_cfg = { 0 };
++	bool fifo_config_dirty;
+ 
+ 	for (size_t i = 0; i < cfg->count; i++) {
+ 		if (cfg->triggers[i].trigger == SENSOR_TRIG_FIFO_WATERMARK) {
+@@ -280,9 +282,13 @@ void lsm6dsv16x_submit_stream(const struct device *dev, struct rtio_iodev_sqe *i
+ 		gpio_pin_interrupt_configure_dt(lsm6dsv16x->drdy_gpio, GPIO_INT_DISABLE);
+ 	}
+ 
++	/* Claim the current dirty state before configuring so a concurrent update remains pending. */
++	fifo_config_dirty = (trig_cfg.int_fifo_th || trig_cfg.int_fifo_full) &&
++			    atomic_cas(&lsm6dsv16x->fifo_config_dirty, 1, 0);
++
+ 	/* if any change in trig_cfg for FIFO triggers */
+ 	if (trig_cfg.int_fifo_th != lsm6dsv16x->trig_cfg.int_fifo_th ||
+-	    trig_cfg.int_fifo_full != lsm6dsv16x->trig_cfg.int_fifo_full) {
++	    trig_cfg.int_fifo_full != lsm6dsv16x->trig_cfg.int_fifo_full || fifo_config_dirty) {
+ 		lsm6dsv16x->trig_cfg.int_fifo_th = trig_cfg.int_fifo_th;
+ 		lsm6dsv16x->trig_cfg.int_fifo_full = trig_cfg.int_fifo_full;
+ 
+diff --git a/tests/drivers/sensor/lsm6dsv16x_stream/CMakeLists.txt b/tests/drivers/sensor/lsm6dsv16x_stream/CMakeLists.txt
+index 4810ddb2f70..1cc711b25a0 100644
+--- a/tests/drivers/sensor/lsm6dsv16x_stream/CMakeLists.txt
++++ b/tests/drivers/sensor/lsm6dsv16x_stream/CMakeLists.txt
+@@ -9,4 +9,5 @@ target_sources(app PRIVATE
+ 
+ target_include_directories(app PRIVATE
+   ${ZEPHYR_BASE}/drivers/sensor/st/lsm6dsv16x
++  ${ZEPHYR_BASE}/drivers/sensor/st/stmemsc
+ )
+diff --git a/tests/drivers/sensor/lsm6dsv16x_stream/src/lsm6dsv16x_emul.c b/tests/drivers/sensor/lsm6dsv16x_stream/src/lsm6dsv16x_emul.c
+index 4259cc3eb9a..0f2e4fefe3c 100644
+--- a/tests/drivers/sensor/lsm6dsv16x_stream/src/lsm6dsv16x_emul.c
++++ b/tests/drivers/sensor/lsm6dsv16x_stream/src/lsm6dsv16x_emul.c
+@@ -33,6 +33,7 @@ enum register_bank {
+ struct lsm6dsv16x_emul_data {
+ 	uint8_t registers[BANK_COUNT][UINT8_MAX + 1];
+ 	uint32_t read_count[UINT8_MAX + 1];
++	uint32_t write_count[UINT8_MAX + 1];
+ 	uint8_t func_cfg_access;
+ 	uint8_t address;
+ 	enum register_bank bank;
+@@ -99,6 +100,7 @@ static int lsm6dsv16x_emul_transfer(const struct emul *target, struct i2c_msg *m
+ 			}
+ 
+ 			data->address = msg->buf[0];
++			data->write_count[data->address]++;
+ 			for (uint32_t j = 1; j < msg->len; j++) {
+ 				emul_write_byte(data, data->address++, msg->buf[j]);
+ 			}
+@@ -168,6 +170,16 @@ uint32_t lsm6dsv16x_emul_read_count(uint8_t reg)
+ 	return emul_data.read_count[reg];
+ }
+ 
++void lsm6dsv16x_emul_clear_write_counts(void)
++{
++	memset(emul_data.write_count, 0, sizeof(emul_data.write_count));
++}
++
++uint32_t lsm6dsv16x_emul_write_count(uint8_t reg)
++{
++	return emul_data.write_count[reg];
++}
++
+ uint8_t lsm6dsv16x_emul_register_get(uint8_t reg)
+ {
+ 	return emul_data.registers[BANK_MAIN][reg];
+diff --git a/tests/drivers/sensor/lsm6dsv16x_stream/src/lsm6dsv16x_emul.h b/tests/drivers/sensor/lsm6dsv16x_stream/src/lsm6dsv16x_emul.h
+index c76c28f1d4b..b7910600b3c 100644
+--- a/tests/drivers/sensor/lsm6dsv16x_stream/src/lsm6dsv16x_emul.h
++++ b/tests/drivers/sensor/lsm6dsv16x_stream/src/lsm6dsv16x_emul.h
+@@ -9,6 +9,8 @@ void lsm6dsv16x_emul_set_fifo_empty(void);
+ void lsm6dsv16x_emul_fail_next_read(uint8_t reg, int error, uint8_t fill);
+ void lsm6dsv16x_emul_clear_read_counts(void);
+ uint32_t lsm6dsv16x_emul_read_count(uint8_t reg);
++void lsm6dsv16x_emul_clear_write_counts(void);
++uint32_t lsm6dsv16x_emul_write_count(uint8_t reg);
+ uint8_t lsm6dsv16x_emul_register_get(uint8_t reg);
+ 
+ #endif /* ZEPHYR_TESTS_DRIVERS_SENSOR_LSM6DSV16X_STREAM_EMUL_H_ */
+diff --git a/tests/drivers/sensor/lsm6dsv16x_stream/src/main.c b/tests/drivers/sensor/lsm6dsv16x_stream/src/main.c
+index 8ad60b0f6e0..d3aa1620143 100644
+--- a/tests/drivers/sensor/lsm6dsv16x_stream/src/main.c
++++ b/tests/drivers/sensor/lsm6dsv16x_stream/src/main.c
+@@ -12,6 +12,7 @@
+ #include <zephyr/rtio/rtio.h>
+ #include <zephyr/ztest.h>
+ 
++#include "lsm6dsv16x.h"
+ #include "lsm6dsv16x_decoder.h"
+ 
+ #define SENSOR_NODE           DT_NODELABEL(lsm6dsv16x)
+@@ -240,6 +241,31 @@ ZTEST(lsm6dsv16x_stream, test_mixed_fifo_and_drdy_is_rejected_without_leaking_st
+ 	stop_stream(recovery);
+ }
+ 
++ZTEST(lsm6dsv16x_stream, test_changed_gyro_bias_forces_fifo_reconfiguration)
++{
++	struct lsm6dsv16x_data *data = sensor->data;
++	struct sensor_value bias[3] = {
++		{ .val1 = 0, .val2 = 100000 },
++		{ .val1 = 0, .val2 = -200000 },
++		{ .val1 = 0, .val2 = 300000 },
++	};
++	struct rtio_sqe *handle = start_stream();
++
++	zassert_false(atomic_get(&data->fifo_config_dirty));
++	zassert_ok(sensor_attr_set(sensor, SENSOR_CHAN_GBIAS_XYZ, SENSOR_ATTR_OFFSET, bias));
++	zassert_true(atomic_get(&data->fifo_config_dirty));
++	stop_stream(handle);
++
++	/* Model late cancellation, where the completed shot did not clear trig_cfg. */
++	data->trig_cfg.int_fifo_th = 1;
++	data->trig_cfg.int_fifo_full = 0;
++	lsm6dsv16x_emul_clear_write_counts();
++	handle = start_stream();
++	zassert_false(atomic_get(&data->fifo_config_dirty));
++	zassert_not_equal(0, lsm6dsv16x_emul_write_count(REG_FIFO_CTRL4));
++	stop_stream(handle);
++}
++
+ ZTEST(lsm6dsv16x_stream, test_hardware_fifo_timestamp_is_configured_and_decoded)
+ {
+ 	struct rtio_sqe *handle = start_stream();

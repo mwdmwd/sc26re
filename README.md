@@ -130,9 +130,9 @@ This software comes with no warranty, express or implied, not even MERCHANTABILI
 
 The custom firmware is laid out to avoid writing the stock firmware storage area (which has some annoying consequences for firmware updating), but that is not foolproof. If you modify it, do not carelessly use flash writing functions, and think twice before changing the flash layouts.
 
-## Original firmware notes
+## Firmware baseline
 
-The public NCS v2.9.0 release is used as the closest practical baseline for clean Zephyr builds. The firmware banners in the analyzed controller and puck images refer to Zephyr/NCS revisions that do not exist in the public upstream repositories.
+Custom firmware builds use upstream Zephyr 4.4.1 and its Free software Bluetooth controller. It does not use NCS, MPSL, or any nonfree Nordic libraries.
 
 ## License
 

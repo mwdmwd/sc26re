@@ -5,7 +5,7 @@
 #include <nordic/nrf52833_qiaa.dtsi>
 #include "steam_controller_ibex_nrf52833-pinctrl.dtsi"
 #include <zephyr/dt-bindings/adc/adc.h>
-#include <zephyr/dt-bindings/adc/nrf-saadc.h>
+#include <zephyr/dt-bindings/adc/nrf-adc.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 #include <zephyr/dt-bindings/pwm/pwm.h>
 #include <zephyr/dt-bindings/sensor/lsm6dsv16x.h>
@@ -315,9 +315,14 @@
 		compatible = "st,lsm6dsv16x";
 		reg = <0x6a>;
 		accel-range = <LSM6DSV16X_DT_FS_2G>;
-		accel-odr = <LSM6DSV16X_DT_ODR_HA01_AT_250Hz>;
+		accel-odr = <LSM6DSVXXX_DT_ODR_HA01_AT_250Hz>;
 		gyro-range = <LSM6DSV16X_DT_FS_2000DPS>;
-		gyro-odr = <LSM6DSV16X_DT_ODR_HA01_AT_250Hz>;
+		gyro-odr = <LSM6DSVXXX_DT_ODR_HA01_AT_250Hz>;
+		fifo-watermark = <3>;
+		accel-fifo-batch-rate = <LSM6DSVXXX_DT_XL_BATCHED_AT_240Hz>;
+		gyro-fifo-batch-rate = <LSM6DSVXXX_DT_GY_BATCHED_AT_240Hz>;
+		sflp-odr = <LSM6DSVXXX_DT_SFLP_ODR_AT_240Hz>;
+		sflp-fifo-enable = <LSM6DSVXXX_DT_SFLP_FIFO_GAME_ROTATION_GBIAS>;
 		int1-gpios = <&gpio0 7 GPIO_ACTIVE_HIGH>;
 		drdy-pin = <1>;
 		status = "okay";

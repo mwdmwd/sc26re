@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SC26re user <@>
+Date: Sat, 18 Jul 2026 07:37:45 +0200
+Subject: [PATCH] drivers: sensor: preserve lsm6dsv16x ODR during SFLP setup
+
+The raw ODR setters update the cached accel_freq and gyro_freq
+fields. Save both values before temporarily matching the SFLP rate so
+the requested sensor modes can be restored afterward.
+
+diff --git a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_rtio_stream.c b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_rtio_stream.c
+index 92f727c749d..33eda714156 100644
+--- a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_rtio_stream.c
++++ b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_rtio_stream.c
+@@ -195,6 +195,9 @@ static void lsm6dsv16x_config_fifo(const struct device *dev, struct trigger_conf
+ 	 * Temporarily set Accel and gyro odr same as sensor fusion LP in order to
+ 	 * make the SFLP gbias setting effective. Then restore it to saved values.
+ 	 */
++	const uint8_t saved_accel_odr = lsm6dsv16x->accel_freq;
++	const uint8_t saved_gyro_odr = lsm6dsv16x->gyro_freq;
++
+ 	switch (sflp_odr) {
+ 	case LSM6DSVXXX_DT_SFLP_ODR_AT_480Hz:
+ 		lsm6dsv16x_accel_set_odr_raw(dev, LSM6DSVXXX_DT_ODR_AT_480Hz);
+@@ -234,8 +237,8 @@ static void lsm6dsv16x_config_fifo(const struct device *dev, struct trigger_conf
+ 	lsm6dsv16x_sflp_game_gbias_set(ctx, &gbias);
+ 
+ 	/* restore accel/gyro odr to saved values */
+-	lsm6dsv16x_accel_set_odr_raw(dev, lsm6dsv16x->accel_freq);
+-	lsm6dsv16x_gyro_set_odr_raw(dev, lsm6dsv16x->gyro_freq);
++	lsm6dsv16x_accel_set_odr_raw(dev, saved_accel_odr);
++	lsm6dsv16x_gyro_set_odr_raw(dev, saved_gyro_odr);
+ 
+ 	/* Set pin interrupt (fifo_th could be on or off) */
+ 	if ((config->drdy_pin == 1) || (ON_I3C_BUS(config) && (!I3C_INT_PIN(config)))) {

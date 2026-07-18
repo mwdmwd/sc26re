@@ -19,15 +19,6 @@ config IBEX_FIRMWARE_IDENTITY
 	  Human-readable identity embedded in the application and shown by the
 	  steamctl status shell command.
 
-config SC26RE_ALLOW_NORDIC_NONFREE
-	bool "Allow Nordic-licensed radio components"
-	default n
-	help
-	  Enable firmware options that link nonfree Nordic-5-Clause
-	  components from nRF Connect SDK, including MPSL, SoftDevice
-	  Controller, and the NCS ESB subsystem. Leave this disabled for
-	  redistributable AGPL-only firmware builds.
-
 config GPIO_GREENPAK
 	bool "Valve GreenPAK input GPIO driver"
 	default y if DT_HAS_VALVE_SLG4L48185_GPIO_ENABLED
@@ -40,10 +31,10 @@ config GPIO_GREENPAK
 config IBEX_BLE
 	bool "Bluetooth LE HID transport"
 	default y
-	depends on BT && SC26RE_ALLOW_NORDIC_NONFREE
+	depends on BT
 	select BT_GATT_CLIENT
 	help
-	  Include the NCS Bluetooth HID transport for BLE support.
+	  Include the Bluetooth HID transport for BLE support.
 
 config IBEX_USB_HID
 	bool "USB HID transport"
@@ -72,59 +63,23 @@ config IBEX_PUCK_INTERFACE
 config IBEX_ESB
 	bool "Enhanced ShockBurst transport (puck support)"
 	default n
+	depends on SOC_NRF52833
 	select ENTROPY_GENERATOR
+	select DYNAMIC_INTERRUPTS if IBEX_BLE && BT_LL_SW_SPLIT
+	select DYNAMIC_DIRECT_INTERRUPTS if IBEX_BLE && BT_LL_SW_SPLIT
+	select BT_CTLR_DYNAMIC_INTERRUPTS if IBEX_BLE && BT_LL_SW_SPLIT
 	help
 	  Include the ESB transport for Valve HID support over Enhanced ShockBurst.
 	  Also known as "puck support".
 
-choice SC26RE_ESB_BACKEND
-	prompt "ESB radio backend"
-	default SC26RE_ESB_BACKEND_NCS if SC26RE_ALLOW_NORDIC_NONFREE
-	default SC26RE_ESB_BACKEND_DIRECT
-	depends on IBEX_ESB
-
-config SC26RE_ESB_BACKEND_DIRECT
-	bool "Direct NRF_RADIO backend"
-	depends on SOC_NRF52833
-	help
-	  Use direct nRF RADIO programming to avoid proprietary Nordic ESB/MPSL libraries
-	  for ESB.
-
-config SC26RE_ESB_BACKEND_NCS
-	bool "Nordic NCS ESB backend"
-	depends on SC26RE_ALLOW_NORDIC_NONFREE
-	select ESB
-	select DYNAMIC_INTERRUPTS
-	select DYNAMIC_DIRECT_INTERRUPTS
-	select MPSL_DYNAMIC_INTERRUPTS
-	select ESB_DYNAMIC_INTERRUPTS
-	help
-	  Use the nRF Connect SDK ESB subsystem. This includes nonfree
-	  Nordic-5-Clause components through ESB/MPSL so the resulting
-	  firmware is not redistributable.
-
-endchoice
-
-if SC26RE_ESB_BACKEND_NCS
-
-config ESB_MAX_PAYLOAD_LENGTH
-	default 128
-
-config ESB_TX_FIFO_SIZE
-	default 2
-
-config ESB_RX_FIFO_SIZE
-	default 8
-
-config ESB_PIPE_COUNT
-	default 1
-
-endif
-
 config IBEX_ACCELEROMETER
 	bool "Include accelerometer data when accel0 is available"
 	default y
-	depends on SENSOR
+	depends on SENSOR && DT_HAS_ST_LSM6DSV16X_ENABLED
+	help
+	  Include Ibex LSM6DSV16X FIFO and SFLP motion reports. Zephyr 4.4's
+	  asynchronous sensor API is used to consume accelerometer, gyroscope,
+	  game-rotation-vector, and gyroscope-bias frames.
 
 config IBEX_ANALOG_INPUTS
 	bool "Include Ibex stick and trigger ADC inputs"
@@ -150,10 +105,10 @@ config HAPTICS_PWM_NRF
 config IBEX_HAPTICS_PWM
 	bool "Ibex haptics PWM/I2S backend"
 	default y
-	depends on BOARD_STEAM_CONTROLLER_IBEX && GPIO && DT_HAS_VALVE_IBEX_HAPTICS_ENABLED
+	depends on BOARD_STEAM_CONTROLLER_IBEX && DT_HAS_VALVE_IBEX_HAPTICS_ENABLED
 	select FPU
 	select FPU_SHARING
-	select NRFX_PWM0
+	select NRFX_PWM
 	select I2S
 	help
 	  Haptics backend for the genuine Ibex touchpad actuators and the
