@@ -154,7 +154,6 @@ struct ibex_haptics_channel_state
 	float phase_scale;
 	uint32_t attack_samples;
 	uint32_t release_start_sample;
-	uint8_t pcm[IBEX_HAPTICS_PCM_RING_BYTES];
 	uint16_t pcm_head;
 	uint16_t pcm_tail;
 	uint16_t pcm_count;
@@ -194,6 +193,8 @@ static nrf_pwm_values_grouped_t haptics_sequences[IBEX_HAPTICS_PRIMARY_BUFFER_CO
 static nrf_pwm_values_grouped_t haptics_primary_neutral;
 static struct ibex_haptics_channel_state haptics_channels[IBEX_HAPTICS_CHANNEL_COUNT]
                                                          [IBEX_HAPTICS_EFFECT_SLOT_COUNT];
+/* Only the PCM effect slot needs sample storage, so keep one ring per output channel. */
+static uint8_t haptics_pcm_buffers[IBEX_HAPTICS_CHANNEL_COUNT][IBEX_HAPTICS_PCM_RING_BYTES];
 static bool haptics_output_threads_started;
 static bool haptics_primary_running;
 static bool haptics_primary_idle;
@@ -451,19 +452,19 @@ static void pcm_ring_clear(struct ibex_haptics_channel_state *state)
 	state->pcm_next_sample = 0.0f;
 }
 
-static void pcm_ring_push(struct ibex_haptics_channel_state *state, uint8_t sample)
+static void pcm_ring_push(struct ibex_haptics_channel_state *state, uint8_t *buffer, uint8_t sample)
 {
 	if(state->pcm_count == IBEX_HAPTICS_PCM_RING_BYTES)
 	{
 		return;
 	}
-	state->pcm[state->pcm_head] = sample;
+	buffer[state->pcm_head] = sample;
 	state->pcm_head = (state->pcm_head + 1U) % IBEX_HAPTICS_PCM_RING_BYTES;
 	state->pcm_count++;
 }
 
-static bool pcm_ring_read_source_sample(struct ibex_haptics_channel_state *state, bool consume,
-                                        float *sample)
+static bool pcm_ring_read_source_sample(struct ibex_haptics_channel_state *state,
+                                        const uint8_t *buffer, bool consume, float *sample)
 {
 	uint8_t bytes[2] = { 0, 0 };
 
@@ -475,7 +476,7 @@ static bool pcm_ring_read_source_sample(struct ibex_haptics_channel_state *state
 	{
 		uint16_t index = (state->pcm_tail + i) % IBEX_HAPTICS_PCM_RING_BYTES;
 
-		bytes[i] = state->pcm[index];
+		bytes[i] = buffer[index];
 	}
 	if(consume)
 	{
@@ -669,7 +670,7 @@ static void channel_start_pcm(struct ibex_haptics_channel_state *state, size_t i
 	pcm_init_decode_default(state, channel_sample_rate_hz(index));
 	for(uint8_t i = 0; i < sample_count; ++i)
 	{
-		pcm_ring_push(state, samples[i]);
+		pcm_ring_push(state, haptics_pcm_buffers[index], samples[i]);
 	}
 	start = state->pcm_configured &&
 	        state->kind != IBEX_HAPTICS_EFFECT_PCM &&
@@ -871,13 +872,13 @@ static float render_random_lfo_sample(struct ibex_haptics_channel_state *state)
 	return sample;
 }
 
-static float render_pcm_sample(struct ibex_haptics_channel_state *state)
+static float render_pcm_sample(struct ibex_haptics_channel_state *state, const uint8_t *buffer)
 {
 	float sample;
 
 	if(state->pcm_interp_count <= 1U)
 	{
-		if(!pcm_ring_read_source_sample(state, true, &sample))
+		if(!pcm_ring_read_source_sample(state, buffer, true, &sample))
 		{
 			pcm_ring_clear(state);
 			channel_stop(state);
@@ -888,13 +889,13 @@ static float render_pcm_sample(struct ibex_haptics_channel_state *state)
 
 	if(state->pcm_interp_index == 0U)
 	{
-		if(!pcm_ring_read_source_sample(state, true, &state->pcm_current_sample))
+		if(!pcm_ring_read_source_sample(state, buffer, true, &state->pcm_current_sample))
 		{
 			pcm_ring_clear(state);
 			channel_stop(state);
 			return 0.0f;
 		}
-		if(!pcm_ring_read_source_sample(state, false, &state->pcm_next_sample))
+		if(!pcm_ring_read_source_sample(state, buffer, false, &state->pcm_next_sample))
 		{
 			sample = state->pcm_current_sample;
 			channel_deactivate_pcm_preserve_buffer(state);
@@ -913,7 +914,7 @@ static float render_pcm_sample(struct ibex_haptics_channel_state *state)
 	return sample;
 }
 
-static float render_effect_sample(struct ibex_haptics_channel_state *state)
+static float render_effect_sample(struct ibex_haptics_channel_state *state, size_t channel)
 {
 	switch(state->kind)
 	{
@@ -928,7 +929,7 @@ static float render_effect_sample(struct ibex_haptics_channel_state *state)
 		case IBEX_HAPTICS_EFFECT_RANDOM_LFO:
 			return render_random_lfo_sample(state);
 		case IBEX_HAPTICS_EFFECT_PCM:
-			return render_pcm_sample(state);
+			return render_pcm_sample(state, haptics_pcm_buffers[channel]);
 		case IBEX_HAPTICS_EFFECT_IDLE:
 		default:
 			return 0.0f;
@@ -942,7 +943,7 @@ static float render_output_channel_sample(size_t channel)
 
 	for(size_t slot = 0; slot < IBEX_HAPTICS_EFFECT_SLOT_COUNT; ++slot)
 	{
-		sample += render_effect_sample(&haptics_channels[channel][slot]);
+		sample += render_effect_sample(&haptics_channels[channel][slot], channel);
 	}
 	/* OFW channel wiring inverts left0 and right1 after applying the master gain. */
 	if(channel == IBEX_HAPTICS_INDEX_LEFT_0 || channel == IBEX_HAPTICS_INDEX_RIGHT_1)
