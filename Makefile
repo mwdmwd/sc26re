@@ -4,7 +4,6 @@ SC26RE_MAIN_INCLUDED := 1
 # Zephyr SDK / build options
 WEST ?= west
 ZEPHYR_WORKSPACE ?= $(CURDIR)/zephyr
-ZEPHYR_BOARD ?= nrf52833dk/nrf52833
 ZEPHYR_SDK_VERSION ?= 0.17.0
 ZEPHYR_SDK_DIR ?= $(CURDIR)/sdk/zephyr-sdk-$(ZEPHYR_SDK_VERSION)
 ZEPHYR_SDK_DOWNLOAD_DIR ?= $(CURDIR)/sdk/downloads
@@ -57,7 +56,6 @@ BOOTSTUB_CFLAGS := \
 	-Wextra \
 	-DAPP_BASE=$(BOOTSTUB_APP_BASE)
 # --
-EXTRA_HELP ?=
 CLANG_FORMAT ?= clang-format
 APP_SPDX_LICENSE ?= SPDX-License-Identifier: AGPL-3.0-or-later
 # Flashing and debugging for micro:bit v2
@@ -73,20 +71,6 @@ BOOTSTUB_RTT_RAM_SIZE ?= 0x20000
 BOOTSTUB_RTT_PORT ?= 19021
 IBEX_UICR_MAGIC ?= 0xac32a429
 IBEX_UICR_BOARD_ID ?= 0x45
-# Reverse-engineering corpora
-CORPUS_DIR ?= $(CURDIR)/corpus
-CORPUS_STAMP ?= $(CORPUS_DIR)/stamps/zephyr-corpus.stamp
-ZEPHYR_SEEDS := hello hids esb-prx usb-hid cdc-acm
-ZEPHYR_SAMPLE_hello := zephyr/samples/hello_world
-ZEPHYR_SAMPLE_hids := zephyr/samples/bluetooth/peripheral_hids
-ZEPHYR_SAMPLE_esb-prx := nrf/samples/esb/esb_prx
-ZEPHYR_SAMPLE_usb-hid := zephyr/samples/subsys/usb/hid-keyboard
-ZEPHYR_SAMPLE_cdc-acm := zephyr/samples/subsys/usb/cdc_acm
-zephyr_seed_build = build-steamctl-$(1)
-zephyr_seed_app = $(notdir $(ZEPHYR_SAMPLE_$(1)))
-zephyr_seed_elf = $(ZEPHYR_WORKSPACE)/$(call zephyr_seed_build,$(1))/$(call zephyr_seed_app,$(1))/zephyr/zephyr.elf
-ZEPHYR_SEED_ELFS := $(foreach seed,$(ZEPHYR_SEEDS),$(call zephyr_seed_elf,$(seed)))
-ZEPHYR_REF_ELF := $(call zephyr_seed_elf,hids)
 ZEPHYR_APP ?= $(CURDIR)/app
 ZEPHYR_APP_BUILD_PREFIX ?= build-app
 APP_FORMAT_SOURCES := $(shell find "$(ZEPHYR_APP)" -type f \
@@ -108,8 +92,6 @@ ifeq ($(.DEFAULT_GOAL),)
 endif
 
 include Makefile.steam-fetch
-include Makefile.ghidra
-include Makefile.ida
 
 .PHONY: all
 all: help
@@ -245,9 +227,6 @@ $(BOOTSTUB_BUILD_DIR)/ibex-microbit.hex: $(BOOTSTUB_BUILD_DIR)/ibex-microbit.elf
 
 $(BOOTSTUB_BUILD_DIR)/ibex-microbit.bin: $(BOOTSTUB_BUILD_DIR)/ibex-microbit.elf
 	$(BOOTSTUB_OBJCOPY) -O binary "$<" "$@"
-
-.PHONY: zephyr-seeds
-zephyr-seeds: $(addprefix zephyr-,$(ZEPHYR_SEEDS))
 
 .PHONY: zephyr-workspace
 zephyr-workspace: $(ZEPHYR_PATCH_STATE)
@@ -392,39 +371,6 @@ app-clean-microbit:
 app-clean-ibex:
 	rm -rf "$(ZEPHYR_WORKSPACE)/$(ZEPHYR_APP_BUILD_PREFIX)-ibex"
 
-define ZEPHYR_SEED_RULE
-.PHONY: zephyr-$(1)
-zephyr-$(1): zephyr-workspace
-	mkdir -p "$(ZEPHYR_USER_CACHE_DIR)/zephyr"
-	cd "$(ZEPHYR_WORKSPACE)" && $(ZEPHYR_BUILD_ENV) $(WEST) build -p always \
-		-b "$(ZEPHYR_BOARD)" "$(ZEPHYR_SAMPLE_$(1))" \
-		-d "$(call zephyr_seed_build,$(1))" -- -DUSER_CACHE_DIR="$(ZEPHYR_USER_CACHE_DIR)"
-endef
-$(foreach seed,$(ZEPHYR_SEEDS),$(eval $(call ZEPHYR_SEED_RULE,$(seed))))
-
-.PHONY: zephyr-sizes
-zephyr-sizes:
-	arm-none-eabi-size $(foreach elf,$(ZEPHYR_SEED_ELFS),"$(elf)")
-	@printf 'reference elf (%s) defined symbols: ' "$(notdir $(abspath $(ZEPHYR_REF_ELF)/../..))"
-	@arm-none-eabi-nm --defined-only --format=posix "$(ZEPHYR_REF_ELF)" | wc -l
-
-.PHONY: corpus
-corpus: $(CORPUS_STAMP)
-
-$(CORPUS_STAMP):
-	$(MAKE) corpus-refresh
-
-.PHONY: corpus-refresh
-corpus-refresh: zephyr-seeds
-	scripts/collect-zephyr-corpus.sh \
-		"$(ZEPHYR_WORKSPACE)" \
-		"$(CORPUS_DIR)/fid-programs" \
-		"$(CORPUS_DIR)/static-libs" \
-		"$(CORPUS_DIR)/reports" \
-		"$(CORPUS_DIR)/fid-archives"
-	mkdir -p "$(dir $(CORPUS_STAMP))"
-	touch "$(CORPUS_STAMP)"
-
 .PHONY: help
 help:
 	@printf '%s\n' \
@@ -464,12 +410,4 @@ help:
 		'make microbit-uicr-erase            erase the whole nRF52 UICR area' \
 		'make stock-dump                     dump stock flash/FICR/UICR and target metadata via Tigard' \
 		'make stock-dump-{flash,ficr,uicr}   dump one persistent stock memory region via Tigard' \
-		'make stock-runtime-dump             snapshot RAM/registers from running stock firmware via Tigard' \
-		'' \
-		'Reverse-engineering corpus:' \
-		'make zephyr-seeds                   build Zephyr ELFs for symbol matching' \
-		'make zephyr-sizes                   print ELF sizes and symbol count' \
-		'make corpus                         collect seed ELFs and static libraries under corpus/' \
-		'make corpus-refresh                 rebuild seeds and refresh corpus/' \
-		'make ghidra-fidb                    build a Ghidra FIDB from the seed ELF corpus' \
-		$(EXTRA_HELP)
+		'make stock-runtime-dump             snapshot RAM/registers from running stock firmware via Tigard'
