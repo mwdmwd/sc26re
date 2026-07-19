@@ -130,15 +130,3 @@ void valve_identity_copy_serial(enum valve_identity_serial which, uint8_t *dest,
 	memset(dest, 0, dest_size);
 	memcpy(dest, serial, copy_len);
 }
-
-#if defined(CONFIG_USB_DEVICE_STACK)
-uint8_t *usb_update_sn_string_descriptor(void)
-{
-	static uint8_t serial[VALVE_IDENTITY_SERIAL_MAX_TEXT_SIZE + 1];
-	const char *identity_serial = valve_identity_serial(VALVE_IDENTITY_UNIT_SERIAL);
-
-	memset(serial, 0, sizeof(serial));
-	memcpy(serial, identity_serial, MIN(strlen(identity_serial), sizeof(serial) - 1));
-	return serial;
-}
-#endif

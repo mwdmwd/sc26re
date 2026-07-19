@@ -39,14 +39,34 @@ config IBEX_BLE
 config IBEX_USB_HID
 	bool "USB HID transport"
 	default y if BOARD_STEAM_CONTROLLER_IBEX
-	depends on BOARD_STEAM_CONTROLLER_IBEX && USB_DEVICE_HID && !IBEX_USB_CDC_ONLY
+	depends on BOARD_STEAM_CONTROLLER_IBEX && USBD_HID_SUPPORT && !IBEX_USB_CDC_ONLY
 	help
 	  Include the USB HID transport for Valve HID support over USB.
+
+if IBEX_USB_HID
+
+config IBEX_USB_VID
+	hex "USB vendor ID"
+	default 0x28de
+
+config IBEX_USB_PID
+	hex "USB product ID"
+	default 0x1302
+
+config IBEX_USB_MANUFACTURER
+	string "USB manufacturer string"
+	default "Valve Corporation"
+
+config IBEX_USB_PRODUCT
+	string "USB product string"
+	default "SC26re Ibex CFW"
+
+endif
 
 config IBEX_USB_CDC_ONLY
 	bool "Use USB only for the CDC-ACM shell"
 	default n
-	depends on BOARD_STEAM_CONTROLLER_IBEX && USB_DEVICE_STACK
+	depends on BOARD_STEAM_CONTROLLER_IBEX && USB_DEVICE_STACK_NEXT
 	help
 	  Diagnostic mode for radio bring-up: enumerate only the CDC-ACM shell
 	  over USB, with no Valve HID interface. This keeps Steam from opening
