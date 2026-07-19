@@ -58,6 +58,7 @@ BOOTSTUB_CFLAGS := \
 	-DAPP_BASE=$(BOOTSTUB_APP_BASE)
 # --
 CLANG_FORMAT ?= clang-format
+HOSTCC ?= cc
 APP_SPDX_LICENSE ?= SPDX-License-Identifier: AGPL-3.0-or-later
 # Flashing and debugging for micro:bit v2
 OPENOCD ?= openocd
@@ -119,6 +120,17 @@ app-format:
 .PHONY: app-format-check
 app-format-check:
 	$(CLANG_FORMAT) --dry-run -Werror $(APP_FORMAT_SOURCES)
+
+.PHONY: test
+test: test-valve-nvs
+
+.PHONY: test-valve-nvs
+test-valve-nvs:
+	$(HOSTCC) -std=c11 -O2 -Wall -Wextra \
+		-I"$(ZEPHYR_APP)/src" \
+		"$(ZEPHYR_APP)/src/valve_nvs.c" "$(ZEPHYR_APP)/tests/valve_nvs.c" \
+		-o "$@"
+	"./$@" --legacy-fixture "$(ZEPHYR_APP)/tests/fixtures/valve_nvs_3_7_99_wrap.bin"; ex=$$?; rm "$@"; exit "$$ex"
 
 .PHONY: bootstub
 bootstub: $(BOOTSTUB_BUILD_DIR)/ibex-microbit.hex $(BOOTSTUB_BUILD_DIR)/ibex-microbit.bin
@@ -424,6 +436,7 @@ help:
 		'App maintenance:' \
 		'make format                         clang-format app C sources in place' \
 		'make format-check                   verify app C sources match app/.clang-format' \
+		'make test                           run host-side unit tests' \
 		'make zephyr-sdk-arm                 install pinned Zephyr SDK metadata and ARM toolchain under sdk/' \
 		'' \
 		'Firmware/source fetching:' \

@@ -50,6 +50,7 @@ const struct stick_calibration *calibration_stick(enum calibration_side side);
 bool calibration_pressure_loaded(enum calibration_side side);
 const struct pressure_calibration *calibration_pressure(enum calibration_side side);
 int calibration_load_settings(void);
+int calibration_import_imu_from_valve_storage(void);
 int calibration_import_valve_storage(void);
 bool calibration_read_trigger(enum calibration_side side, uint8_t *buf, size_t capacity,
                               size_t *len);

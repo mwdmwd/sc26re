@@ -137,7 +137,7 @@ The stock firmware storage area is left alone:
 0x7d000-0x7ffff
 ```
 
-The CFW tries not to write to the stock firmware storage partition. The current layout is chosen so switching firmware preserves the original firmware's state.
+The CFW accesses the stock firmware storage only through a dedicated read-only parser when importing factory calibration. It does not mount that partition through Zephyr's repair-capable NVS implementation. The current layout is chosen so switching firmware preserves the original firmware's state.
 
 Valve's bootloader erases `0x08000-0x7cfff` at the start of an update, which covers the CFW settings storage at `0x78000-0x7bfff`. So OFW storage should survive CFW/OFW switches, while preserving CFW settings requires support from the host `flash.py` tool.
 

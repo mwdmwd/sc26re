@@ -10,6 +10,7 @@
 #include <zephyr/sys/util.h>
 
 #include "analog.h"
+#include "calibration.h"
 #include "controller.h"
 #include "haptics.h"
 #include "imu.h"
@@ -123,6 +124,11 @@ uint32_t hardware_read_buttons(void)
 int hardware_init(void)
 {
 	int err;
+
+	if(IS_ENABLED(CONFIG_SETTINGS) && IS_ENABLED(CONFIG_BOARD_STEAM_CONTROLLER_IBEX))
+	{
+		(void)calibration_import_imu_from_valve_storage();
+	}
 
 	for(size_t i = 0; i < ARRAY_SIZE(buttons); ++i)
 	{

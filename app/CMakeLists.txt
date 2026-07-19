@@ -61,6 +61,7 @@ target_sources_ifdef(CONFIG_IBEX_ESB app PRIVATE src/transport_esb.c)
 target_sources_ifdef(CONFIG_IBEX_ESB app PRIVATE src/esb_backend_direct.c)
 target_sources_ifdef(CONFIG_IBEX_RGBW_LED app PRIVATE src/rgbw_led.c)
 target_sources_ifdef(CONFIG_GPIO_GREENPAK app PRIVATE drivers/gpio/gpio_greenpak.c)
+target_sources_ifdef(CONFIG_BOARD_STEAM_CONTROLLER_IBEX app PRIVATE src/valve_nvs.c)
 
 if(CONFIG_BOARD_STEAM_CONTROLLER_IBEX)
 	string(REGEX REPLACE "^0[xX]" "" IBEX_FW_TIMESTAMP "${CONFIG_IBEX_BUILD_TIMESTAMP}")

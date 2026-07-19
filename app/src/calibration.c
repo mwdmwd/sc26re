@@ -3,14 +3,19 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <zephyr/kvss/nvs.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/storage/flash_map.h>
+#include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/util.h>
 
 #include "calibration.h"
+#include "imu_bias.h"
+#include "valve_nvs.h"
 
 LOG_MODULE_REGISTER(calibration);
+
+#define IMU_GYRO_BIAS_PATH "cal/sensors/gyroscope/bias"
 
 static struct trigger_calibration trigger_left = {
 	.type = 129,
@@ -288,10 +293,14 @@ static int save_setting(const char *path, const void *value, size_t len)
 }
 
 #if FIXED_PARTITION_EXISTS(valve_storage)
-int calibration_import_valve_storage(void)
+static int valve_storage_read(const void *context, uint32_t offset, void *data, size_t len)
 {
-	const struct flash_area *fa;
-	int err = flash_area_open(PARTITION_ID(valve_storage), &fa);
+	return flash_area_read(context, offset, data, len);
+}
+
+static int open_valve_storage(const struct flash_area **fa, struct valve_nvs *nvs)
+{
+	int err = flash_area_open(PARTITION_ID(valve_storage), fa);
 
 	if(err)
 	{
@@ -299,12 +308,87 @@ int calibration_import_valve_storage(void)
 		return err;
 	}
 
-	struct nvs_fs ofw_nvs = {
-		.flash_device = fa->fa_dev,
-		.offset = fa->fa_off,
-		.sector_size = 4096,
-		.sector_count = 3,
-	};
+	err = valve_nvs_open(nvs, valve_storage_read, *fa, (*fa)->fa_size);
+	if(err)
+	{
+		LOG_INF("OFW valve_storage is unreadable: %d", err);
+		flash_area_close(*fa);
+	}
+	return err;
+}
+
+int calibration_import_imu_from_valve_storage(void)
+{
+	uint8_t encoded_bias[3 * sizeof(uint32_t)];
+	const struct flash_area *fa;
+	struct valve_nvs ofw_nvs;
+	float local_bias[3] = { 0 };
+	float bias[3];
+	ssize_t local_len;
+	int err;
+
+	if(!IS_ENABLED(CONFIG_SETTINGS))
+	{
+		return -ENOTSUP;
+	}
+
+	local_len = settings_load_one(IMU_GYRO_BIAS_PATH, local_bias, sizeof(local_bias));
+	if(local_len == sizeof(local_bias) && imu_gyro_bias_valid(local_bias))
+	{
+		return 0;
+	}
+	if(local_len < 0 && local_len != -ENOENT)
+	{
+		return (int)local_len;
+	}
+	if(local_len > 0)
+	{
+		LOG_WRN("Replacing malformed or invalid persisted gyro bias");
+	}
+
+	err = open_valve_storage(&fa, &ofw_nvs);
+	if(err)
+	{
+		return err;
+	}
+	err = valve_nvs_read_setting(&ofw_nvs, IMU_GYRO_BIAS_PATH, encoded_bias, sizeof(encoded_bias));
+	flash_area_close(fa);
+	if(err == -ENOENT)
+	{
+		return 0;
+	}
+	if(err != sizeof(encoded_bias))
+	{
+		LOG_WRN("Ignoring OFW gyro bias with invalid length: %d", err);
+		return err < 0 ? err : -EINVAL;
+	}
+
+	for(size_t axis = 0; axis < ARRAY_SIZE(bias); ++axis)
+	{
+		uint32_t bits = sys_get_le32(&encoded_bias[axis * sizeof(uint32_t)]);
+
+		memcpy(&bias[axis], &bits, sizeof(bits));
+	}
+	if(!imu_gyro_bias_valid(bias))
+	{
+		LOG_WRN("Ignoring invalid OFW gyro bias");
+		return -ERANGE;
+	}
+
+	err = save_setting(IMU_GYRO_BIAS_PATH, bias, sizeof(bias));
+	if(err)
+	{
+		LOG_WRN("Failed to migrate OFW gyro bias: %d", err);
+		return err;
+	}
+	LOG_INF("Migrated OFW gyro bias");
+	return 0;
+}
+
+int calibration_import_valve_storage(void)
+{
+	const struct flash_area *fa;
+	struct valve_nvs ofw_nvs;
 	bool trg_l_found = false;
 	bool trg_r_found = false;
 	bool joy_l_found = false;
@@ -317,58 +401,27 @@ int calibration_import_valve_storage(void)
 	struct stick_calibration ofw_joy_r = { 0 };
 	struct pressure_calibration ofw_prs_l = { 0 };
 	struct pressure_calibration ofw_prs_r = { 0 };
+	int err;
 
-	err = nvs_mount(&ofw_nvs);
+	err = open_valve_storage(&fa, &ofw_nvs);
 	if(err)
 	{
-		LOG_INF("OFW valve_storage is uninitialized");
-		flash_area_close(fa);
 		return err;
 	}
 
 	LOG_INF("Scanning valve_storage for OFW calibration data...");
-	for(uint16_t name_id = 0x8001; name_id < 0x8050; ++name_id)
-	{
-		char name[32];
-		int rc = nvs_read(&ofw_nvs, name_id, name, sizeof(name) - 1);
-
-		if(rc <= 0)
-		{
-			continue;
-		}
-		name[rc] = '\0';
-
-		if(strcmp(name, "cal/trg_l") == 0)
-		{
-			rc = nvs_read(&ofw_nvs, name_id + 0x4000, &ofw_trg_l, sizeof(ofw_trg_l));
-			trg_l_found = rc == sizeof(ofw_trg_l);
-		}
-		else if(strcmp(name, "cal/trg_r") == 0)
-		{
-			rc = nvs_read(&ofw_nvs, name_id + 0x4000, &ofw_trg_r, sizeof(ofw_trg_r));
-			trg_r_found = rc == sizeof(ofw_trg_r);
-		}
-		else if(strcmp(name, "cal/joy_l") == 0)
-		{
-			rc = nvs_read(&ofw_nvs, name_id + 0x4000, &ofw_joy_l, sizeof(ofw_joy_l));
-			joy_l_found = rc == sizeof(ofw_joy_l);
-		}
-		else if(strcmp(name, "cal/joy_r") == 0)
-		{
-			rc = nvs_read(&ofw_nvs, name_id + 0x4000, &ofw_joy_r, sizeof(ofw_joy_r));
-			joy_r_found = rc == sizeof(ofw_joy_r);
-		}
-		else if(strcmp(name, "cal/prs_l") == 0)
-		{
-			rc = nvs_read(&ofw_nvs, name_id + 0x4000, &ofw_prs_l, sizeof(ofw_prs_l));
-			prs_l_found = rc == sizeof(ofw_prs_l);
-		}
-		else if(strcmp(name, "cal/prs_r") == 0)
-		{
-			rc = nvs_read(&ofw_nvs, name_id + 0x4000, &ofw_prs_r, sizeof(ofw_prs_r));
-			prs_r_found = rc == sizeof(ofw_prs_r);
-		}
-	}
+	err = valve_nvs_read_setting(&ofw_nvs, "cal/trg_l", &ofw_trg_l, sizeof(ofw_trg_l));
+	trg_l_found = err == sizeof(ofw_trg_l);
+	err = valve_nvs_read_setting(&ofw_nvs, "cal/trg_r", &ofw_trg_r, sizeof(ofw_trg_r));
+	trg_r_found = err == sizeof(ofw_trg_r);
+	err = valve_nvs_read_setting(&ofw_nvs, "cal/joy_l", &ofw_joy_l, sizeof(ofw_joy_l));
+	joy_l_found = err == sizeof(ofw_joy_l);
+	err = valve_nvs_read_setting(&ofw_nvs, "cal/joy_r", &ofw_joy_r, sizeof(ofw_joy_r));
+	joy_r_found = err == sizeof(ofw_joy_r);
+	err = valve_nvs_read_setting(&ofw_nvs, "cal/prs_l", &ofw_prs_l, sizeof(ofw_prs_l));
+	prs_l_found = err == sizeof(ofw_prs_l);
+	err = valve_nvs_read_setting(&ofw_nvs, "cal/prs_r", &ofw_prs_r, sizeof(ofw_prs_r));
+	prs_r_found = err == sizeof(ofw_prs_r);
 	flash_area_close(fa);
 
 	if(!trigger_left_loaded && trg_l_found && calibration_trigger_valid(&ofw_trg_l))
@@ -447,6 +500,11 @@ int calibration_import_valve_storage(void)
 	return 0;
 }
 #else
+int calibration_import_imu_from_valve_storage(void)
+{
+	return -ENODEV;
+}
+
 int calibration_import_valve_storage(void)
 {
 	return -ENODEV;
