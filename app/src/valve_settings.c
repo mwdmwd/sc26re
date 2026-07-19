@@ -320,7 +320,7 @@ static bool nvs_offset_path(const char *path, off_t *offset)
 	{
 		return false;
 	}
-	if(parsed >= FIXED_PARTITION_SIZE(storage_partition) || (parsed % sizeof(uint32_t)) != 0U)
+	if(parsed >= PARTITION_SIZE(storage_partition) || (parsed % sizeof(uint32_t)) != 0U)
 	{
 		return false;
 	}
@@ -348,7 +348,7 @@ static bool nvs_read_path(const char *path, uint8_t *buf, size_t capacity, size_
 		{
 			return false;
 		}
-		sys_put_le32(FIXED_PARTITION_SIZE(storage_partition), &buf[0]);
+		sys_put_le32(PARTITION_SIZE(storage_partition), &buf[0]);
 		sys_put_le32(VALVE_NVS_CHUNK_SIZE, &buf[4]);
 		*len = VALVE_NVS_INFO_SIZE;
 		return true;
@@ -358,14 +358,14 @@ static bool nvs_read_path(const char *path, uint8_t *buf, size_t capacity, size_
 		return false;
 	}
 
-	err = flash_area_open(FIXED_PARTITION_ID(storage_partition), &fa);
+	err = flash_area_open(PARTITION_ID(storage_partition), &fa);
 	if(err)
 	{
 		LOG_ERR("failed to open CFW NVS partition: %d", err);
 		return false;
 	}
 
-	read_len = MIN(VALVE_NVS_CHUNK_SIZE, FIXED_PARTITION_SIZE(storage_partition) - offset);
+	read_len = MIN(VALVE_NVS_CHUNK_SIZE, PARTITION_SIZE(storage_partition) - offset);
 	err = flash_area_read(fa, offset, buf, read_len);
 	flash_area_close(fa);
 	if(err)
@@ -461,13 +461,13 @@ static int nvs_write_path(const char *path, const uint8_t *value, size_t len)
 		return -ENOENT;
 	}
 	if(len > VALVE_NVS_CHUNK_SIZE ||
-	   offset + len > FIXED_PARTITION_SIZE(storage_partition) ||
+	   offset + len > PARTITION_SIZE(storage_partition) ||
 	   (len % sizeof(uint32_t)) != 0U)
 	{
 		return -EINVAL;
 	}
 
-	err = flash_area_open(FIXED_PARTITION_ID(storage_partition), &fa);
+	err = flash_area_open(PARTITION_ID(storage_partition), &fa);
 	if(err)
 	{
 		return err;
@@ -579,12 +579,12 @@ static int nvs_commit_path(const char *path)
 		return -ENOENT;
 	}
 
-	err = flash_area_open(FIXED_PARTITION_ID(storage_partition), &fa);
+	err = flash_area_open(PARTITION_ID(storage_partition), &fa);
 	if(err)
 	{
 		return err;
 	}
-	err = flash_area_erase(fa, 0, FIXED_PARTITION_SIZE(storage_partition));
+	err = flash_area_erase(fa, 0, PARTITION_SIZE(storage_partition));
 	flash_area_close(fa);
 	if(err)
 	{

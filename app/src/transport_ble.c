@@ -597,8 +597,8 @@ static void ble_connected_cb(struct bt_conn *conn, uint8_t err)
 
 	if(bt_conn_get_info(conn, &info) == 0)
 	{
-		LOG_INF("connected: CI=%u (%u.%02u ms)", info.le.interval, info.le.interval * 125 / 100,
-		        (info.le.interval * 125) % 100);
+		LOG_INF("connected: CI=%u us (%u.%03u ms)", info.le.interval_us, info.le.interval_us / 1000,
+		        info.le.interval_us % 1000);
 	}
 
 	/* 6..12 * 1.25 ms = 7.5..15 ms, latency 0, timeout 4 s */

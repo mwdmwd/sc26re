@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <zephyr/fs/nvs.h>
+#include <zephyr/kvss/nvs.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/storage/flash_map.h>
@@ -291,7 +291,7 @@ static int save_setting(const char *path, const void *value, size_t len)
 int calibration_import_valve_storage(void)
 {
 	const struct flash_area *fa;
-	int err = flash_area_open(FIXED_PARTITION_ID(valve_storage), &fa);
+	int err = flash_area_open(PARTITION_ID(valve_storage), &fa);
 
 	if(err)
 	{
