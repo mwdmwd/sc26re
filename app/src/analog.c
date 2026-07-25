@@ -251,7 +251,8 @@ int analog_init(void)
 	                                   !calibration_stick_loaded(CALIBRATION_LEFT) ||
 	                                   !calibration_stick_loaded(CALIBRATION_RIGHT) ||
 	                                   !calibration_pressure_loaded(CALIBRATION_LEFT) ||
-	                                   !calibration_pressure_loaded(CALIBRATION_RIGHT)))
+	                                   !calibration_pressure_loaded(CALIBRATION_RIGHT) ||
+	                                   !calibration_battery_voltage_offset_loaded()))
 	{
 		(void)calibration_import_valve_storage();
 	}

@@ -16,6 +16,7 @@
 LOG_MODULE_REGISTER(calibration);
 
 #define IMU_GYRO_BIAS_PATH "cal/sensors/gyroscope/bias"
+#define BATTERY_VOLTAGE_OFFSET_LIMIT_MV 500
 
 static struct trigger_calibration trigger_left = {
 	.type = 129,
@@ -31,6 +32,7 @@ static struct stick_calibration stick_right = {
 };
 static struct pressure_calibration pressure_left;
 static struct pressure_calibration pressure_right;
+static int16_t battery_voltage_offset_mv;
 
 static bool trigger_left_loaded;
 static bool trigger_right_loaded;
@@ -38,6 +40,7 @@ static bool stick_left_loaded;
 static bool stick_right_loaded;
 static bool pressure_left_loaded;
 static bool pressure_right_loaded;
+static bool battery_voltage_offset_loaded;
 static bool trigger_left_dirty;
 static bool trigger_right_dirty;
 static bool pressure_left_dirty;
@@ -108,6 +111,48 @@ bool calibration_pressure_loaded(enum calibration_side side)
 const struct pressure_calibration *calibration_pressure(enum calibration_side side)
 {
 	return pressure_for_side(side);
+}
+
+bool calibration_battery_voltage_offset_loaded(void)
+{
+	return battery_voltage_offset_loaded;
+}
+
+int16_t calibration_battery_voltage_offset_mv(void)
+{
+	return battery_voltage_offset_mv;
+}
+
+static bool battery_voltage_offset_valid(int16_t offset_mv)
+{
+	/* Corruption guard only, factory trim should be much smaller. */
+	return offset_mv >= -BATTERY_VOLTAGE_OFFSET_LIMIT_MV &&
+	       offset_mv <= BATTERY_VOLTAGE_OFFSET_LIMIT_MV;
+}
+
+static int load_battery_voltage_offset(settings_read_cb read_cb, void *cb_arg)
+{
+	int16_t loaded;
+	ssize_t read_len = read_cb(cb_arg, &loaded, sizeof(loaded));
+
+	if(read_len < 0)
+	{
+		return read_len;
+	}
+	if(read_len != sizeof(loaded))
+	{
+		return -EINVAL;
+	}
+	if(!battery_voltage_offset_valid(loaded))
+	{
+		LOG_WRN("Ignoring implausible battery-meter voltage offset: %d mV", loaded);
+		return 0;
+	}
+
+	battery_voltage_offset_mv = loaded;
+	battery_voltage_offset_loaded = true;
+	LOG_INF("Loaded battery-meter voltage offset: %d mV", loaded);
+	return 0;
 }
 
 static int load_trigger_setting(enum calibration_side side, settings_read_cb read_cb, void *cb_arg)
@@ -261,6 +306,12 @@ static int cal_settings_set(const char *name, size_t len, settings_read_cb read_
 		           ? load_pressure_setting(CALIBRATION_RIGHT, read_cb, cb_arg)
 		           : -EINVAL;
 	}
+	if(strcmp(name, "volt_offset") == 0)
+	{
+		return len == sizeof(battery_voltage_offset_mv)
+		           ? load_battery_voltage_offset(read_cb, cb_arg)
+		           : -EINVAL;
+	}
 	if(strcmp(name, "sensors/gyroscope/bias") == 0)
 	{
 		/* Loaded explicitly by the IMU module. */
@@ -395,12 +446,14 @@ int calibration_import_valve_storage(void)
 	bool joy_r_found = false;
 	bool prs_l_found = false;
 	bool prs_r_found = false;
+	bool volt_offset_found = false;
 	struct trigger_calibration ofw_trg_l = { 0 };
 	struct trigger_calibration ofw_trg_r = { 0 };
 	struct stick_calibration ofw_joy_l = { 0 };
 	struct stick_calibration ofw_joy_r = { 0 };
 	struct pressure_calibration ofw_prs_l = { 0 };
 	struct pressure_calibration ofw_prs_r = { 0 };
+	int16_t ofw_volt_offset = 0;
 	int err;
 
 	err = open_valve_storage(&fa, &ofw_nvs);
@@ -422,6 +475,9 @@ int calibration_import_valve_storage(void)
 	prs_l_found = err == sizeof(ofw_prs_l);
 	err = valve_nvs_read_setting(&ofw_nvs, "cal/prs_r", &ofw_prs_r, sizeof(ofw_prs_r));
 	prs_r_found = err == sizeof(ofw_prs_r);
+	err = valve_nvs_read_setting(&ofw_nvs, "cal/volt_offset", &ofw_volt_offset,
+	                             sizeof(ofw_volt_offset));
+	volt_offset_found = err == sizeof(ofw_volt_offset);
 	flash_area_close(fa);
 
 	if(!trigger_left_loaded && trg_l_found && calibration_trigger_valid(&ofw_trg_l))
@@ -494,6 +550,26 @@ int calibration_import_valve_storage(void)
 		{
 			LOG_INF("Migrated cal/prs_r: mode=%u min=%d max=%d scale=%u", ofw_prs_r.mode,
 			        ofw_prs_r.min, ofw_prs_r.max, ofw_prs_r.pressure_scale);
+		}
+	}
+	if(!battery_voltage_offset_loaded &&
+	   volt_offset_found &&
+	   !battery_voltage_offset_valid(ofw_volt_offset))
+	{
+		LOG_WRN("Ignoring implausible OFW cal/volt_offset: %d mV", ofw_volt_offset);
+	}
+	else if(!battery_voltage_offset_loaded && volt_offset_found)
+	{
+		battery_voltage_offset_mv = ofw_volt_offset;
+		battery_voltage_offset_loaded = true;
+		err = save_setting("cal/volt_offset", &ofw_volt_offset, sizeof(ofw_volt_offset));
+		if(err)
+		{
+			LOG_WRN("Failed to persist migrated cal/volt_offset: %d", err);
+		}
+		else
+		{
+			LOG_INF("Migrated cal/volt_offset: %d mV", ofw_volt_offset);
 		}
 	}
 

@@ -49,6 +49,8 @@ const struct trigger_calibration *calibration_trigger(enum calibration_side side
 const struct stick_calibration *calibration_stick(enum calibration_side side);
 bool calibration_pressure_loaded(enum calibration_side side);
 const struct pressure_calibration *calibration_pressure(enum calibration_side side);
+bool calibration_battery_voltage_offset_loaded(void);
+int16_t calibration_battery_voltage_offset_mv(void);
 int calibration_load_settings(void);
 int calibration_import_imu_from_valve_storage(void);
 int calibration_import_valve_storage(void);
