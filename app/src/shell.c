@@ -81,12 +81,12 @@ static int cmd_status(const struct shell *shell, size_t argc, char **argv)
 	shell_print(shell, "ESB radio: end=%u crc-ok=%u crc-bad=%u drop=%u",
 	            transport_esb_backend_end_events(), transport_esb_backend_crc_ok_events(),
 	            transport_esb_backend_crc_bad_events(), transport_esb_backend_rx_dropped_events());
-	if(!battery_err)
+	if(!battery_err || battery_err == -ESTALE)
 	{
-		shell_print(shell, "battery: %u%% %umV state=%s input=%umV current=%umA type=%u",
-		            battery.level_percent, battery.battery_mv,
-		            battery_charge_state_name(battery.charge_state), battery.input_mv,
-		            battery.current_ma, battery.charger_type);
+		shell_print(shell, "battery%s: %u%% %umV state=%s input=%umV current=%umA type=%u",
+		            battery_err == -ESTALE ? " (stale)" : "", battery.level_percent,
+		            battery.battery_mv, battery_charge_state_name(battery.charge_state),
+		            battery.input_mv, battery.current_ma, battery.charger_type);
 	}
 	return 0;
 }
@@ -94,29 +94,60 @@ static int cmd_status(const struct shell *shell, size_t argc, char **argv)
 static int cmd_battery_status(const struct shell *shell, size_t argc, char **argv)
 {
 	struct controller_battery_report battery;
+	uint32_t temperature_abs_mc;
+	uint8_t chg_stat;
 	int err;
 
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
 	err = battery_get_status(&battery);
-	if(err)
+	if(err && err != -ESTALE)
 	{
 		shell_error(shell, "battery status unavailable: %d", err);
 		return err;
 	}
+	if(err == -ESTALE)
+	{
+		shell_warn(shell, "battery sample is stale");
+	}
+	temperature_abs_mc = battery.temperature_estimate_mc < 0
+	                         ? (uint32_t)(-(int64_t)battery.temperature_estimate_mc)
+	                         : (uint32_t)battery.temperature_estimate_mc;
+	chg_stat = (battery.status_flags >> 3) & 0x03U;
 
-	shell_print(shell, "valid: %u", battery.valid);
+	shell_print(shell, "valid: %u; sample age: %u ms", battery.valid, battery.sample_age_ms);
 	shell_print(shell, "charge state: %u (%s)", battery.charge_state,
 	            battery_charge_state_name(battery.charge_state));
+	shell_print(shell, "hardware: REG0C=0x%02x VIN_STAT=%u CHG_STAT=%u; policy=%u (%s)",
+	            battery.status_flags, battery.charger_type, chg_stat, battery.fuel_gauge_state,
+	            battery_fuel_gauge_state_name(battery.fuel_gauge_state));
 	shell_print(shell, "level: %u%%", battery.level_percent);
-	shell_print(shell, "battery voltage: %u mV", battery.battery_mv);
+	shell_print(shell, "battery voltage: %u mV (MP2733 ADC: %u mV)", battery.battery_mv,
+	            battery.charger_battery_mv);
 	shell_print(shell, "system voltage: %u mV", battery.system_mv);
 	shell_print(shell, "input voltage: %u mV", battery.input_mv);
-	shell_print(shell, "charge/discharge current: %u mA", battery.current_ma);
+	shell_print(shell, "%s current estimate: %u mA (ADC raw=%u)",
+	            chg_stat == 1U || chg_stat == 2U ? "charge" : "non-charging", battery.current_ma,
+	            battery.current_raw);
 	shell_print(shell, "input current: %u mA", battery.input_current_ma);
-	shell_print(shell, "temperature estimate: %u C", battery.temperature_c);
-	shell_print(shell, "charger type: %u", battery.charger_type);
+	shell_print(shell, "temperature estimate: %s%u.%03u C (wire value: %u mC)",
+	            battery.temperature_estimate_mc < 0 ? "-" : "", temperature_abs_mc / 1000U,
+	            temperature_abs_mc % 1000U, battery.temperature_mc);
+	shell_print(shell, "NTC: ADC raw=%u float=%u fault=%u", battery.ntc_raw,
+	            (battery.status_flags & BIT(2)) != 0U, battery.fault_status & 0x07U);
+	shell_print(shell, "charger type: %u (nominal source rating %u mA)", battery.charger_type,
+	            battery.source_rating_ma);
+	shell_print(shell, "input limit: %u mA requested, %u mA effective",
+	            battery.requested_input_limit_ma, battery.effective_input_limit_ma);
+	shell_print(shell, "input voltage limit: %u mV requested, %u mV observed",
+	            battery.requested_vin_min_mv, battery.observed_vin_min_mv);
+	shell_print(shell, "requested battery target: %u mV", battery.requested_vbat_target_mv);
+	shell_print(shell, "MP2733 status: REG0D=0x%02x REG14=0x%02x REG17=0x%02x",
+	            battery.fault_status, battery.power_status, battery.reg17_status);
+	shell_print(shell, "REG17: safety-expired=%u fast-charge-adapter=%u OTG=%u",
+	            (battery.reg17_status & BIT(7)) != 0U, (battery.reg17_status & BIT(6)) != 0U,
+	            (battery.reg17_status & BIT(5)) != 0U);
 	return 0;
 }
 
