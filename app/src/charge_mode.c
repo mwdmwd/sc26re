@@ -127,7 +127,7 @@ static bool charge_full(void)
 {
 	struct controller_battery_report report;
 
-	if(battery_read_fresh_status(&report))
+	if(battery_get_status(&report))
 	{
 		return false;
 	}

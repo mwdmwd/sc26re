@@ -951,7 +951,7 @@ int transport_ble_send_battery_status(const struct controller_battery_report *re
 	sys_put_le16(report->input_mv, &input_43.data[6]);
 	sys_put_le16(report->current_ma, &input_43.data[8]);
 	sys_put_le16(report->input_current_ma, &input_43.data[10]);
-	sys_put_le16(report->temperature_c, &input_43.data[12]);
+	sys_put_le16(report->temperature_mc, &input_43.data[12]);
 
 	if(active_conn == NULL)
 	{

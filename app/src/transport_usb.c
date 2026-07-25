@@ -601,7 +601,7 @@ int transport_usb_send_battery_status(const struct controller_battery_report *re
 	sys_put_le16(report->input_mv, &body[6]);
 	sys_put_le16(report->current_ma, &body[8]);
 	sys_put_le16(report->input_current_ma, &body[10]);
-	sys_put_le16(report->temperature_c, &body[12]);
+	sys_put_le16(report->temperature_mc, &body[12]);
 
 	return usb_queue_input_report(ID_TRITON_BATTERY_STATUS, body, sizeof(body));
 }
