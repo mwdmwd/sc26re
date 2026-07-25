@@ -144,9 +144,12 @@ config IBEX_RGBW_LED
 config IBEX_BATTERY
 	bool "Ibex battery and charger reporting"
 	default y if DT_HAS_MONOLITHICPOWER_MP2733_ENABLED
-	depends on I2C && DT_HAS_MONOLITHICPOWER_MP2733_ENABLED
+	depends on I2C && IBEX_ANALOG_INPUTS
+	depends on DT_HAS_MONOLITHICPOWER_MP2733_ENABLED
+	depends on DT_HAS_VALVE_IBEX_BATTERY_METER_ENABLED
 	help
-	  Poll the MP2733 charger/fuel-gauge and expose battery level over HID/BLE BAS.
+	  Poll the MP2733 charger and the switched battery-voltage divider, then
+	  expose battery level over HID/BLE BAS.
 
 endmenu
 

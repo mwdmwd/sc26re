@@ -5,6 +5,7 @@
 
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/adc.h>
+#include <zephyr/drivers/adc/voltage_divider.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -27,8 +28,13 @@ LOG_MODULE_REGISTER(analog);
 #define TRIGGER_RANGE_MARGIN_PERCENT 15
 #define TRIGGER_CLICK_THRESHOLD_SETTING SETTING_TRIGGER_THRESHOLD_PERCENT
 #define TRIGGER_CLICK_RELEASE_HYSTERESIS_PERCENT 5
-#define PUCK_PILOT_SAMPLE_COUNT 3
 #define PUCK_PILOT_PRESENT_MIN_MV 2000
+
+#if CONFIG_IBEX_BATTERY
+#define BATTERY_METER_NODE DT_NODELABEL(battery_meter)
+#define BATTERY_METER_POWER_SETTLE_US DT_PROP(BATTERY_METER_NODE, power_on_sample_delay_us)
+#define BATTERY_METER_MAX_SAMPLES 40
+#endif
 
 enum analog_channel
 {
@@ -50,6 +56,12 @@ static const struct adc_dt_spec analog_channels[] = {
 	ADC_DT_SPEC_GET_BY_NAME(ANALOG_NODE, trigger_right),
 };
 static const struct gpio_dt_spec analog_enable = GPIO_DT_SPEC_GET(ANALOG_NODE, enable_gpios);
+#if CONFIG_IBEX_BATTERY
+static const struct voltage_divider_dt_spec battery_meter =
+    VOLTAGE_DIVIDER_DT_SPEC_GET(BATTERY_METER_NODE);
+static const struct gpio_dt_spec battery_meter_enable =
+    GPIO_DT_SPEC_GET(BATTERY_METER_NODE, power_gpios);
+#endif
 static bool trigger_left_click_latched;
 static bool trigger_right_click_latched;
 static bool analog_ready;
@@ -180,6 +192,18 @@ int analog_init(void)
 		LOG_ERR("Ibex analog enable GPIO is not ready");
 		return -ENODEV;
 	}
+#if CONFIG_IBEX_BATTERY
+	if(!adc_is_ready_dt(&battery_meter.port))
+	{
+		LOG_ERR("Ibex battery-meter SAADC is not ready");
+		return -ENODEV;
+	}
+	if(!gpio_is_ready_dt(&battery_meter_enable))
+	{
+		LOG_ERR("Ibex battery-meter power GPIO is not ready");
+		return -ENODEV;
+	}
+#endif
 
 	err = gpio_pin_configure_dt(&analog_enable, GPIO_OUTPUT_INACTIVE);
 	if(err)
@@ -197,6 +221,21 @@ int analog_init(void)
 			return err;
 		}
 	}
+
+#if CONFIG_IBEX_BATTERY
+	err = adc_channel_setup_dt(&battery_meter.port);
+	if(err)
+	{
+		LOG_ERR("battery-meter SAADC channel setup failed: %d", err);
+		return err;
+	}
+	err = gpio_pin_configure_dt(&battery_meter_enable, GPIO_OUTPUT_INACTIVE);
+	if(err)
+	{
+		LOG_ERR("battery-meter power GPIO setup failed: %d", err);
+		return err;
+	}
+#endif
 
 	if(IS_ENABLED(CONFIG_SETTINGS))
 	{
@@ -233,7 +272,7 @@ int analog_init(void)
 	return 0;
 }
 
-static int analog_take(void)
+static int analog_inputs_take(void)
 {
 	int err;
 
@@ -248,7 +287,7 @@ static int analog_take(void)
 	return 0;
 }
 
-static int analog_put(void)
+static int analog_inputs_put(void)
 {
 	int err;
 
@@ -262,9 +301,13 @@ static int analog_put(void)
 int analog_puck_pilot_present(bool *present)
 {
 	const struct adc_dt_spec *channel = &analog_channels[ANALOG_PUCK_PILOT];
+	struct adc_sequence sequence = {
+		.channels = BIT(channel->channel_id),
+		.buffer_size = sizeof(int16_t),
+		.resolution = 12,
+	};
 	int16_t raw;
 	int32_t mv;
-	int present_samples = 0;
 	int err;
 
 	if(present == NULL)
@@ -278,44 +321,112 @@ int analog_puck_pilot_present(bool *present)
 		return -ENODEV;
 	}
 
-	err = analog_take();
+	err = analog_inputs_take();
 	if(err)
 	{
 		return err;
 	}
 
-	for(size_t i = 0; i < PUCK_PILOT_SAMPLE_COUNT; ++i)
+	sequence.buffer = &raw;
+	err = adc_read(channel->dev, &sequence);
+	if(err)
 	{
-		struct adc_sequence sequence = {
-			.channels = BIT(channel->channel_id),
-			.buffer = &raw,
-			.buffer_size = sizeof(raw),
-			.resolution = 12,
-		};
-
-		err = adc_read(channel->dev, &sequence);
-		if(err)
-		{
-			goto out_disable;
-		}
-
-		mv = raw;
-		err = adc_raw_to_millivolts_dt(channel, &mv);
-		if(err)
-		{
-			goto out_disable;
-		}
-
-		present_samples += mv >= PUCK_PILOT_PRESENT_MIN_MV;
-		k_msleep(100);
+		goto out_disable;
 	}
 
-	*present = present_samples > PUCK_PILOT_SAMPLE_COUNT / 2;
+	mv = raw;
+	err = adc_raw_to_millivolts_dt(channel, &mv);
+	if(err)
+	{
+		goto out_disable;
+	}
+
+	*present = mv >= PUCK_PILOT_PRESENT_MIN_MV;
 	err = 0;
 
 out_disable:
-	analog_put();
+	(void)analog_inputs_put();
 	return err;
+}
+
+int analog_battery_voltage_samples_mv(uint16_t *samples, size_t sample_count)
+{
+#if CONFIG_IBEX_BATTERY
+	int16_t raw[BATTERY_METER_MAX_SAMPLES];
+	struct adc_sequence_options options;
+	struct adc_sequence sequence;
+	int disable_err;
+	int err;
+
+	if(samples == NULL || sample_count == 0U)
+	{
+		return -EINVAL;
+	}
+	if(sample_count > ARRAY_SIZE(raw))
+	{
+		return -E2BIG;
+	}
+	if(!analog_ready)
+	{
+		return -ENODEV;
+	}
+
+	options = (struct adc_sequence_options){
+		.extra_samplings = sample_count - 1U,
+	};
+	sequence = (struct adc_sequence){
+		.options = &options,
+		.channels = BIT(battery_meter.port.channel_id),
+		.buffer = raw,
+		.buffer_size = sample_count * sizeof(raw[0]),
+		.resolution = battery_meter.port.resolution,
+	};
+
+	err = gpio_pin_set_dt(&battery_meter_enable, 1);
+	if(err)
+	{
+		return err;
+	}
+	/* The divider can settle while the regular input path continues using the SAADC. */
+	k_usleep(BATTERY_METER_POWER_SETTLE_US);
+
+	k_mutex_lock(&analog_lock, K_FOREVER);
+	err = adc_read(battery_meter.port.dev, &sequence);
+	k_mutex_unlock(&analog_lock);
+
+	disable_err = gpio_pin_set_dt(&battery_meter_enable, 0);
+	if(err || disable_err)
+	{
+		return err ? err : disable_err;
+	}
+
+	for(size_t i = 0; i < sample_count; ++i)
+	{
+		int32_t adc_uv;
+		int64_t battery_uv;
+
+		adc_uv = raw[i];
+		err = adc_raw_to_microvolts_dt(&battery_meter.port, &adc_uv);
+		if(err)
+		{
+			return err;
+		}
+		battery_uv = adc_uv;
+		err = voltage_divider_scale64_dt(&battery_meter, &battery_uv);
+		if(err)
+		{
+			return err;
+		}
+		samples[i] = CLAMP(battery_uv / 1000, 0, UINT16_MAX);
+	}
+
+	return 0;
+#else
+	ARG_UNUSED(samples);
+	ARG_UNUSED(sample_count);
+
+	return -ENODEV;
+#endif
 }
 
 int analog_read_report(struct controller_report *report)
@@ -339,14 +450,14 @@ int analog_read_report(struct controller_report *report)
 		return -ENODEV;
 	}
 
-	err = analog_take();
+	err = analog_inputs_take();
 	if(err)
 	{
 		return err;
 	}
 
 	err = adc_read(analog_channels[0].dev, &sequence);
-	analog_put();
+	(void)analog_inputs_put();
 	if(err)
 	{
 		return err;

@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+description: Ibex switched battery voltage divider
+
+compatible: "valve,ibex-battery-meter"
+
+include: voltage-divider.yaml
+
+properties:
+  power-gpios:
+    type: phandle-array
+    required: true
+    description: Enables the battery-divider measurement path
+
+  power-on-sample-delay-us:
+    type: int
+    required: true
+    description: Divider settling time after power is enabled

@@ -170,6 +170,16 @@
 				   "trigger-left", "trigger-right";
 	};
 
+	battery_meter: battery_meter {
+		compatible = "valve,ibex-battery-meter";
+		io-channels = <&adc 6>;
+		output-ohms = <301000>;
+		full-ohms = <522000>;
+		power-gpios = <&gpio1 1 GPIO_ACTIVE_HIGH>;
+		/* OFW 0x39730 enables the divider; 0x33c96 waits this long before sampling. */
+		power-on-sample-delay-us = <5000>;
+	};
+
 	ibex_haptics: ibex_haptics {
 		compatible = "valve,ibex-haptics";
 		enable-gpios = <&gpio0 9 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
@@ -277,6 +287,16 @@
 		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 3)>;
 		zephyr,input-positive = <NRF_SAADC_AIN0>;
 		zephyr,vref-mv = <825>;
+		zephyr,resolution = <12>;
+	};
+
+	channel@6 {
+		reg = <6>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 40)>;
+		zephyr,input-positive = <NRF_SAADC_AIN3>;
+		zephyr,vref-mv = <600>;
 		zephyr,resolution = <12>;
 	};
 };
