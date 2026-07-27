@@ -44,7 +44,7 @@ Currently working at least partially:
     - [ ] Verify that idle power consumption matches OFW
   - [x] Battery level
   - [x] Charger detection
-  - [ ] Adjust charger settings based on power source
+  - [x] Adjust charger settings based on power source
 - [ ] LEDs
   - [x] RGBW LED
   - [ ] IR LED
