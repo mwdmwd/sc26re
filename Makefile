@@ -130,13 +130,18 @@ test: test-valve-nvs test-haptics-stereo test-hosttools
 test-hosttools:
 	python3 -m unittest discover -s tests -p 'test_*.py'
 
-.PHONY: test-valve-nvs
-test-valve-nvs:
+define host-test
 	$(HOSTCC) -std=c11 -O2 -Wall -Wextra \
 		-I"$(ZEPHYR_APP)/src" \
-		"$(ZEPHYR_APP)/src/valve_nvs.c" "$(ZEPHYR_APP)/tests/valve_nvs.c" \
+		"$<" \
+		$(if $(2),"$(2)") \
 		-o "$@"
-	"./$@" --legacy-fixture "$(ZEPHYR_APP)/tests/fixtures/valve_nvs_3_7_99_wrap.bin"; ex=$$?; rm "$@"; exit "$$ex"
+	"./$@" $(1); ex=$$?; rm "$@"; exit "$$ex"
+endef
+
+.PHONY: test-valve-nvs
+test-valve-nvs: $(ZEPHYR_APP)/tests/valve_nvs.c
+	$(call host-test,--legacy-fixture "$(ZEPHYR_APP)/tests/fixtures/valve_nvs_3_7_99_wrap.bin",$(ZEPHYR_APP)/src/valve_nvs.c)
 
 .PHONY: test-haptics-stereo
 test-haptics-stereo: zephyr-workspace
