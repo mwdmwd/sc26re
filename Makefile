@@ -122,7 +122,7 @@ app-format-check:
 	$(CLANG_FORMAT) --dry-run -Werror $(APP_FORMAT_SOURCES)
 
 .PHONY: test
-test: test-valve-nvs
+test: test-valve-nvs test-haptics-stereo
 
 .PHONY: test-valve-nvs
 test-valve-nvs:
@@ -131,6 +131,12 @@ test-valve-nvs:
 		"$(ZEPHYR_APP)/src/valve_nvs.c" "$(ZEPHYR_APP)/tests/valve_nvs.c" \
 		-o "$@"
 	"./$@" --legacy-fixture "$(ZEPHYR_APP)/tests/fixtures/valve_nvs_3_7_99_wrap.bin"; ex=$$?; rm "$@"; exit "$$ex"
+
+.PHONY: test-haptics-stereo
+test-haptics-stereo: zephyr-workspace
+	cd "$(ZEPHYR_WORKSPACE)" && $(ZEPHYR_BUILD_ENV) $(WEST) build -p "$(ZEPHYR_PRISTINE)" \
+		-b native_sim "$(ZEPHYR_APP)/tests/haptics_stereo" -d build-test-haptics-stereo
+	"$(ZEPHYR_WORKSPACE)/build-test-haptics-stereo/zephyr/zephyr.exe"
 
 .PHONY: bootstub
 bootstub: $(BOOTSTUB_BUILD_DIR)/ibex-microbit.hex $(BOOTSTUB_BUILD_DIR)/ibex-microbit.bin

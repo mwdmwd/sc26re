@@ -425,6 +425,7 @@ __weak int haptics_backend_effect(const struct haptics_effect *effect)
 			return haptics_backend_tone(effect->frequency_hz, effect->duration_ms);
 		case HAPTICS_EFFECT_PCM_CONFIG:
 		case HAPTICS_EFFECT_PCM_S8:
+		case HAPTICS_EFFECT_PCM_STEREO:
 		case HAPTICS_EFFECT_SCREAM:
 			return -ENOTSUP;
 		case HAPTICS_EFFECT_PULSE_ONE_SHOT:
@@ -657,6 +658,8 @@ static const char *haptics_effect_name(enum haptics_effect_type type)
 			return "pcm_config";
 		case HAPTICS_EFFECT_PCM_S8:
 			return "pcm_s8";
+		case HAPTICS_EFFECT_PCM_STEREO:
+			return "pcm_stereo";
 		case HAPTICS_EFFECT_SCREAM:
 			return "scream";
 		default:
@@ -688,7 +691,8 @@ static int haptics_submit_effect(const struct haptics_effect *effect)
 
 	if(effect->type == HAPTICS_EFFECT_STOP_PCM ||
 	   effect->type == HAPTICS_EFFECT_PCM_CONFIG ||
-	   effect->type == HAPTICS_EFFECT_PCM_S8)
+	   effect->type == HAPTICS_EFFECT_PCM_S8 ||
+	   effect->type == HAPTICS_EFFECT_PCM_STEREO)
 	{
 		msgq = &haptics_pcm_msgq;
 	}
@@ -854,6 +858,29 @@ static int haptics_submit_pcm(uint8_t channels, const uint8_t *samples, size_t s
 
 	command.sample_count = MIN(sample_count, (size_t)HAPTICS_PCM_MAX_SAMPLES);
 	memcpy(command.samples, samples, command.sample_count);
+	return haptics_submit_effect(&command);
+}
+
+static int haptics_submit_pcm_stereo(const uint8_t *left, const uint8_t *right, size_t sample_count)
+{
+	struct haptics_effect command = {
+		.type = HAPTICS_EFFECT_PCM_STEREO,
+		.channels = HAPTICS_CHANNEL_LEFT_1 | HAPTICS_CHANNEL_RIGHT_1,
+	};
+
+	if(sample_count == 0)
+	{
+		return 0;
+	}
+
+	/*
+	 * Keep both sides in one queue entry. The I2S renderer has a higher priority than the
+	 * PCM worker, so separate entries can wake it after only one side crosses its start
+	 * threshold and leave the streams permanently offset.
+	 */
+	command.sample_count = sample_count;
+	memcpy(command.samples, left, command.sample_count);
+	memcpy(&command.samples[HAPTICS_PCM_STEREO_MAX_SAMPLES], right, command.sample_count);
 	return haptics_submit_effect(&command);
 }
 
@@ -1627,10 +1654,7 @@ static int handle_haptic_pcm_mono_with_length(const uint8_t *data, size_t len, b
 
 static int handle_haptic_pcm_stereo(const uint8_t *data, size_t len, bool log)
 {
-	size_t expected_len;
 	uint8_t sample_count;
-	int first_err = 0;
-	int err;
 
 	if(len == 0)
 	{
@@ -1646,27 +1670,12 @@ static int handle_haptic_pcm_stereo(const uint8_t *data, size_t len, bool log)
 		return -EINVAL;
 	}
 
-	expected_len = 1U + (size_t)data[0] * 2U;
-	if(len < expected_len)
-	{
-		return -EMSGSIZE;
-	}
 	if((size_t)sample_count + 32U > len)
 	{
 		return -EMSGSIZE;
 	}
 
-	err = haptics_submit_pcm(HAPTICS_CHANNEL_RIGHT_1, &data[32], sample_count);
-	if(err)
-	{
-		first_err = err;
-	}
-	err = haptics_submit_pcm(HAPTICS_CHANNEL_LEFT_1, &data[1], sample_count);
-	if(first_err == 0 && err)
-	{
-		first_err = err;
-	}
-	return first_err;
+	return haptics_submit_pcm_stereo(&data[1], &data[32], sample_count);
 }
 
 int haptics_handle_output_report(uint8_t report_id, const uint8_t *data, size_t len)

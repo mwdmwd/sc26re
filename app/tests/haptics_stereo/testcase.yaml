@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+tests:
+  app.haptics.stereo:
+    platform_allow:
+      - native_sim
+    tags:
+      - haptics
+      - pcm

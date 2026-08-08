@@ -91,6 +91,7 @@ BUILD_ASSERT(HAPTICS_WAVEFORM_SCREAM_SAMPLE_FORMAT == HAPTICS_WAVEFORM_SAMPLE_FO
 BUILD_ASSERT(HAPTICS_WAVEFORM_TICK_SAMPLES == ARRAY_SIZE(haptics_waveform_tick));
 BUILD_ASSERT(HAPTICS_WAVEFORM_CLICK_SAMPLES == ARRAY_SIZE(haptics_waveform_click));
 BUILD_ASSERT(HAPTICS_WAVEFORM_SCREAM_SAMPLES == ARRAY_SIZE(haptics_waveform_scream));
+BUILD_ASSERT(2U * HAPTICS_PCM_STEREO_MAX_SAMPLES == HAPTICS_PCM_MAX_SAMPLES);
 
 enum ibex_haptics_channel_index
 {
@@ -1588,6 +1589,21 @@ static void apply_pcm(struct ibex_haptics_channel_state *state, size_t index, vo
 	channel_start_pcm(state, index, pcm->samples, pcm->sample_count);
 }
 
+struct pcm_stereo_context
+{
+	const uint8_t *left;
+	const uint8_t *right;
+	uint8_t sample_count;
+};
+
+static void apply_pcm_stereo(struct ibex_haptics_channel_state *state, size_t index, void *context)
+{
+	const struct pcm_stereo_context *pcm = context;
+	const uint8_t *samples = index == IBEX_HAPTICS_INDEX_LEFT_1 ? pcm->left : pcm->right;
+
+	channel_start_pcm(state, index, samples, pcm->sample_count);
+}
+
 struct pcm_config_context
 {
 	uint8_t format;
@@ -1907,6 +1923,18 @@ int haptics_backend_effect(const struct haptics_effect *effect)
 
 			return submit_channels(effect->channels, IBEX_HAPTICS_SLOT_PCM, apply_pcm, &context,
 			                       effect->sample_count);
+		}
+		case HAPTICS_EFFECT_PCM_STEREO:
+		{
+			struct pcm_stereo_context context = {
+				.left = effect->samples,
+				.right = &effect->samples[HAPTICS_PCM_STEREO_MAX_SAMPLES],
+				.sample_count = effect->sample_count,
+			};
+
+			/* Fill and activate both streams under one lock, then wake I2S once. */
+			return submit_channels(effect->channels, IBEX_HAPTICS_SLOT_PCM, apply_pcm_stereo,
+			                       &context, effect->sample_count);
 		}
 		case HAPTICS_EFFECT_SCREAM:
 		{
