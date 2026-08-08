@@ -122,7 +122,11 @@ app-format-check:
 	$(CLANG_FORMAT) --dry-run -Werror $(APP_FORMAT_SOURCES)
 
 .PHONY: test
-test: test-valve-nvs test-haptics-stereo
+test: test-valve-nvs test-haptics-stereo test-hosttools
+
+.PHONY: test-hosttools
+test-hosttools:
+	python3 -m unittest discover -s tests -p 'test_*.py'
 
 .PHONY: test-valve-nvs
 test-valve-nvs:

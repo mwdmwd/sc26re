@@ -235,8 +235,11 @@ class FirmwareImage:
         fw_class = FW_MAGIC.get(magic)
         if fw_class is None:
             raise ToolError("ERROR: INVALID FIRMWARE FILE")
+        if payload_len == 0:
+            raise ToolError("ERROR: INVALID FIRMWARE FILE")
         if payload_len != len(payload):
             raise ToolError("ERROR: INVALID FIRMWARE FILE")
+
         actual_crc = zlib.crc32(payload) & 0xFFFFFFFF
         if actual_crc != expected_crc:
             raise ToolError("ERROR: INVALID FIRMWARE FILE")
@@ -1126,8 +1129,6 @@ def flash_bootloader_port(
         port = bootloader_begin_firmware(port_name, port, verbose=verbose)
         total = len(firmware.payload)
         sent = 0
-        if total == 0:
-            out("PROGRESS: 100%")
         # The bootloader parser accepts at most 0x8003 decoded bytes. Keep the
         # 2-byte message ID, 2-byte chunk length, and aligned data below that.
         for offset in range(0, total, FW_DATA_CHUNK_SIZE):
@@ -1586,15 +1587,14 @@ def cmd_bl_info(args: argparse.Namespace) -> int:
 
 def cmd_bl_flash(args: argparse.Namespace) -> int:
     port_name, fw_class, _ = resolve_bootloader_selection(args, query=False)
-    device_class = fw_class
-    if device_class is None and args.target is None:
-        out(
-            "WARNING: Could not infer bootloader class from port; firmware/device class match was not verified"
+    if fw_class is None:
+        raise ToolError(
+            "ERROR: Could not infer bootloader class from port; refusing to erase unverified device"
         )
     fw = FirmwareImage.load(
         Path(args.firmware),
         target=args.target,
-        device_class=device_class,
+        device_class=fw_class,
         verbose=args.verbose,
     )
     flash_bootloader_port(port_name, fw, verbose=args.verbose)
