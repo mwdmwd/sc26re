@@ -570,12 +570,17 @@ def cfw_nvs_read_image(handle: Any, report_id: int, *, verbose: bool = False) ->
     for offset in range(0, size, chunk_size):
         path = f"{CFW_NVS_PATH_PREFIX}{offset:04x}"
         chunk = cfw_nvs_read_chunk(handle, report_id, path, offset)
+        expected_len = min(chunk_size, size - offset)
+        if len(chunk) != expected_len:
+            raise ToolError(
+                f"ERROR: CFW NVS read at offset 0x{offset:04x} returned "
+                f"{len(chunk)} bytes; expected {expected_len}"
+            )
         image.extend(chunk)
         if verbose:
             percent = int((len(image) * 100) / size)
             out(f"NVS SAVE: {percent}%")
 
-    del image[size:]
     return CfwNvsImage(bytes(image), chunk_size)
 
 
@@ -633,16 +638,19 @@ def save_cfw_nvs_from_device(device: Device, *, verbose: bool = False) -> CfwNvs
             close_device(handle)
 
 
-def restore_cfw_nvs_to_device(
-    device: Device, image: CfwNvsImage, *, verbose: bool = False, reboot: bool = True
-) -> None:
+def restore_cfw_nvs_to_device(device: Device, image: CfwNvsImage, *, verbose: bool = False) -> None:
     handle = None
     try:
         handle = open_hid_device(device.hid_path)
         report_id = cfw_nvs_report_selection(device)
         cfw_nvs_write_image(handle, report_id, image, verbose=verbose)
-        if reboot:
-            hid_exchange(handle, report_id, 0x95, expect_response=False)
+        hid_exchange(
+            handle,
+            report_id,
+            0x95,
+            expect_response=False,
+            allow_disconnect=True,
+        )
     finally:
         if handle is not None:
             close_device(handle)
@@ -1518,11 +1526,9 @@ def cmd_settings_restore(args: argparse.Namespace) -> int:
         device,
         CfwNvsImage(data=data, chunk_size=0),
         verbose=args.verbose,
-        reboot=not args.no_reboot,
     )
     out(f"RESTORED: {args.input} ({len(data)} bytes)")
-    if not args.no_reboot:
-        out("REBOOTING")
+    out("REBOOTING")
     return 0
 
 
@@ -1725,7 +1731,6 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("settings-restore", parents=[common])
     p.add_argument("--serial", required=True)
     p.add_argument("--input", required=True)
-    p.add_argument("--no-reboot", action="store_true", default=False)
     p.set_defaults(func=cmd_settings_restore)
 
     p = sub.add_parser("bl-list", parents=[common])

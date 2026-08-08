@@ -454,14 +454,16 @@ static int nvs_write_path(const char *path, const uint8_t *value, size_t len)
 #if FIXED_PARTITION_EXISTS(storage_partition)
 	const struct flash_area *fa;
 	off_t offset;
+	size_t expected_len;
 	int err;
 
 	if(!nvs_offset_path(path, &offset))
 	{
 		return -ENOENT;
 	}
-	if(len > VALVE_NVS_CHUNK_SIZE ||
-	   offset + len > PARTITION_SIZE(storage_partition) ||
+	expected_len = MIN(VALVE_NVS_CHUNK_SIZE, PARTITION_SIZE(storage_partition) - offset);
+	if((offset % VALVE_NVS_CHUNK_SIZE) != 0U ||
+	   len != expected_len ||
 	   (len % sizeof(uint32_t)) != 0U)
 	{
 		return -EINVAL;
