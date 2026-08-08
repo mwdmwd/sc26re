@@ -78,18 +78,21 @@ static void gpio_greenpak_work_handler(struct k_work *work)
 	gpio_port_value_t state;
 	gpio_port_pins_t changed = 0;
 
-	if(gpio_greenpak_read_inputs(data->dev, &state) == 0)
+	if(gpio_greenpak_read_inputs(data->dev, &state) != 0)
 	{
-		k_mutex_lock(&data->lock, K_FOREVER);
-		changed = (state ^ data->input_state) & data->interrupt_enabled;
-		data->input_state = state;
-		data->pending |= changed;
-		k_mutex_unlock(&data->lock);
+		/* All exposed GreenPAK inputs are active-low. */
+		state = config->common.port_pin_mask;
+	}
 
-		if(changed != 0U)
-		{
-			gpio_fire_callbacks(&data->callbacks, data->dev, changed);
-		}
+	k_mutex_lock(&data->lock, K_FOREVER);
+	changed = (state ^ data->input_state) & data->interrupt_enabled;
+	data->input_state = state;
+	data->pending |= changed;
+	k_mutex_unlock(&data->lock);
+
+	if(changed != 0U)
+	{
+		gpio_fire_callbacks(&data->callbacks, data->dev, changed);
 	}
 
 	k_work_reschedule(&data->work, K_MSEC(config->poll_interval_ms));

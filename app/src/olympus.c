@@ -49,6 +49,13 @@ LOG_MODULE_REGISTER(olympus);
 #define OLYMPUS_VENDOR_ID 0x0488
 #define OLYMPUS_PRODUCT_ID_A 0xd0c1
 #define OLYMPUS_PRODUCT_ID_B 0x1015
+#define OLYMPUS_FRAME_STALE_MS 500
+#define OLYMPUS_REPORT_BUTTON_MASK \
+	(BIT(CONTROLLER_BUTTON_LEFT_TOUCHPAD_TOUCH) | \
+	 BIT(CONTROLLER_BUTTON_LEFT_TOUCHPAD_CLICK) | BIT(CONTROLLER_BUTTON_LEFT_STICK_TOUCH) | \
+	 BIT(CONTROLLER_BUTTON_LEFT_GRIP_TOUCH) | BIT(CONTROLLER_BUTTON_RIGHT_TOUCHPAD_TOUCH) | \
+	 BIT(CONTROLLER_BUTTON_RIGHT_TOUCHPAD_CLICK) | \
+	 BIT(CONTROLLER_BUTTON_RIGHT_STICK_TOUCH) | BIT(CONTROLLER_BUTTON_RIGHT_GRIP_TOUCH))
 
 static const struct i2c_dt_spec olympus_i2c = I2C_DT_SPEC_GET(OLYMPUS_NODE);
 static const struct gpio_dt_spec olympus_irq = GPIO_DT_SPEC_GET(OLYMPUS_NODE, int_gpios);
@@ -58,8 +65,10 @@ static struct gpio_callback olympus_irq_callback;
 static struct k_sem olympus_irq_sem;
 static struct k_mutex olympus_report_mutex;
 static struct controller_report olympus_report;
+static bool olympus_report_valid;
 static struct olympus_debug_snapshot olympus_debug;
 static uint32_t olympus_frame_count;
+static int64_t olympus_last_valid_frame_ms;
 static struct k_thread olympus_thread;
 static K_THREAD_STACK_DEFINE(olympus_thread_stack, 2048);
 
@@ -863,9 +872,36 @@ static void olympus_process_sensor_payload(const uint8_t *payload)
 
 	k_mutex_lock(&olympus_report_mutex, K_FOREVER);
 	olympus_report = next;
+	olympus_report_valid = true;
+	olympus_last_valid_frame_ms = k_uptime_get();
 	debug.frame_count = ++olympus_frame_count;
 	olympus_debug = debug;
 	k_mutex_unlock(&olympus_report_mutex);
+	hardware_signal_input_changed();
+}
+
+static void olympus_invalidate_report(void)
+{
+	bool was_valid;
+
+	k_mutex_lock(&olympus_report_mutex, K_FOREVER);
+	was_valid = olympus_report_valid;
+	olympus_report_valid = false;
+	memset(&olympus_report, 0, sizeof(olympus_report));
+	olympus_debug = (struct olympus_debug_snapshot){
+		.frame_count = olympus_frame_count,
+	};
+	k_mutex_unlock(&olympus_report_mutex);
+
+	if(!was_valid)
+	{
+		return;
+	}
+
+	memset(&left_pad, 0, sizeof(left_pad));
+	memset(&right_pad, 0, sizeof(right_pad));
+	haptics_touchpad_update(false, false, false, 0, 0);
+	haptics_touchpad_update(true, false, false, 0, 0);
 	hardware_signal_input_changed();
 }
 
@@ -922,12 +958,26 @@ static void olympus_thread_entry(void *unused1, void *unused2, void *unused3)
 		while(gpio_pin_get_dt(&olympus_irq) > 0)
 		{
 			int err = olympus_read_frame();
-
 			if(err)
 			{
 				LOG_DBG("frame read failed: %d", err);
+				olympus_invalidate_report();
 				break;
 			}
+		}
+
+		k_mutex_lock(&olympus_report_mutex, K_FOREVER);
+		bool report_active = (olympus_report.buttons & OLYMPUS_REPORT_BUTTON_MASK) != 0U ||
+		                     olympus_report.touchpad_left_pressure != 0U ||
+		                     olympus_report.touchpad_right_pressure != 0U;
+		bool stale = olympus_report_valid &&
+		             report_active &&
+		             k_uptime_get() - olympus_last_valid_frame_ms >= OLYMPUS_FRAME_STALE_MS;
+		k_mutex_unlock(&olympus_report_mutex);
+		if(stale)
+		{
+			LOG_WRN("no Olympus frame for %u ms; releasing cached inputs", OLYMPUS_FRAME_STALE_MS);
+			olympus_invalidate_report();
 		}
 	}
 }
