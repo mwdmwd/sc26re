@@ -10,6 +10,8 @@ ZEPHYR_SDK_DOWNLOAD_DIR ?= $(CURDIR)/sdk/downloads
 ZEPHYR_SDK_RELEASE_URL ?= https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v$(ZEPHYR_SDK_VERSION)
 ZEPHYR_SDK_MINIMAL_ARCHIVE := zephyr-sdk-$(ZEPHYR_SDK_VERSION)_linux-x86_64_minimal.tar.xz
 ZEPHYR_SDK_ARM_ARCHIVE := toolchain_gnu_linux-x86_64_arm-zephyr-eabi.tar.xz
+ZEPHYR_SDK_MINIMAL_SHA256 := ca9bc0ff66fafca1dac9d592a36d953cf16d096a9d09b1c0357f021cf9f6a7eb
+ZEPHYR_SDK_ARM_SHA256 := 21b85981cb5a1818d9bc53d82af80f208946ec038b982ff1907287572ed3a634
 ZEPHYR_SDK_STAMP := $(ZEPHYR_SDK_DIR)/.arm-toolchain-installed
 ZEPHYR_SDK_CMAKE_CONFIG := $(ZEPHYR_SDK_DIR)/cmake/Zephyr-sdkConfig.cmake
 ZEPHYR_SDK_GNU_DIR := $(ZEPHYR_SDK_DIR)/gnu
@@ -360,7 +362,9 @@ zephyr-patches-update: $(ZEPHYR_WEST_UPDATE_STAMP)
 
 .PHONY: zephyr-sdk-arm
 zephyr-sdk-arm:
-	@if ! test -f "$(ZEPHYR_SDK_CMAKE_CONFIG)" || ! test -x "$(ZEPHYR_SDK_ARM_GCC)"; then \
+	@if ! test -f "$(ZEPHYR_SDK_STAMP)" || \
+	   ! test -f "$(ZEPHYR_SDK_CMAKE_CONFIG)" || \
+	   ! test -x "$(ZEPHYR_SDK_ARM_GCC)"; then \
 		$(MAKE) zephyr-sdk-arm-install; \
 	fi
 
@@ -368,19 +372,46 @@ $(ZEPHYR_SDK_DOWNLOAD_DIR):
 	mkdir -p "$@"
 
 $(ZEPHYR_SDK_DOWNLOAD_DIR)/$(ZEPHYR_SDK_MINIMAL_ARCHIVE): | $(ZEPHYR_SDK_DOWNLOAD_DIR)
-	curl -fL --retry 3 --continue-at - "$(ZEPHYR_SDK_RELEASE_URL)/$(ZEPHYR_SDK_MINIMAL_ARCHIVE)" -o "$@"
+	@archive="$@.part"; \
+	curl -fL --retry 3 --continue-at - "$(ZEPHYR_SDK_RELEASE_URL)/$(ZEPHYR_SDK_MINIMAL_ARCHIVE)" -o "$$archive"; \
+	if ! printf '%s  %s\n' "$(ZEPHYR_SDK_MINIMAL_SHA256)" "$$archive" | sha256sum --check -; then \
+		rm -f "$$archive"; \
+		exit 1; \
+	fi; \
+	mv "$$archive" "$@"
 
 $(ZEPHYR_SDK_DOWNLOAD_DIR)/$(ZEPHYR_SDK_ARM_ARCHIVE): | $(ZEPHYR_SDK_DOWNLOAD_DIR)
-	curl -fL --retry 3 --continue-at - "$(ZEPHYR_SDK_RELEASE_URL)/$(ZEPHYR_SDK_ARM_ARCHIVE)" -o "$@"
+	@archive="$@.part"; \
+	curl -fL --retry 3 --continue-at - "$(ZEPHYR_SDK_RELEASE_URL)/$(ZEPHYR_SDK_ARM_ARCHIVE)" -o "$$archive"; \
+	if ! printf '%s  %s\n' "$(ZEPHYR_SDK_ARM_SHA256)" "$$archive" | sha256sum --check -; then \
+		rm -f "$$archive"; \
+		exit 1; \
+	fi; \
+	mv "$$archive" "$@"
 
 .PHONY: zephyr-sdk-arm-install
 zephyr-sdk-arm-install: \
 		$(ZEPHYR_SDK_DOWNLOAD_DIR)/$(ZEPHYR_SDK_MINIMAL_ARCHIVE) \
 		$(ZEPHYR_SDK_DOWNLOAD_DIR)/$(ZEPHYR_SDK_ARM_ARCHIVE)
+	@if ! printf '%s  %s\n' "$(ZEPHYR_SDK_MINIMAL_SHA256)" \
+		"$(ZEPHYR_SDK_DOWNLOAD_DIR)/$(ZEPHYR_SDK_MINIMAL_ARCHIVE)" | sha256sum --check -; then \
+		rm -f "$(ZEPHYR_SDK_DOWNLOAD_DIR)/$(ZEPHYR_SDK_MINIMAL_ARCHIVE)"; \
+		exit 1; \
+	fi
+	@if ! printf '%s  %s\n' "$(ZEPHYR_SDK_ARM_SHA256)" \
+		"$(ZEPHYR_SDK_DOWNLOAD_DIR)/$(ZEPHYR_SDK_ARM_ARCHIVE)" | sha256sum --check -; then \
+		rm -f "$(ZEPHYR_SDK_DOWNLOAD_DIR)/$(ZEPHYR_SDK_ARM_ARCHIVE)"; \
+		exit 1; \
+	fi
+	rm -rf "$(ZEPHYR_SDK_DIR)"
 	mkdir -p "$(dir $(ZEPHYR_SDK_DIR))"
-	tar -xJf "$(ZEPHYR_SDK_DOWNLOAD_DIR)/$(ZEPHYR_SDK_MINIMAL_ARCHIVE)" -C "$(dir $(ZEPHYR_SDK_DIR))"
+	tar -xJf "$(ZEPHYR_SDK_DOWNLOAD_DIR)/$(ZEPHYR_SDK_MINIMAL_ARCHIVE)" \
+		-C "$(dir $(ZEPHYR_SDK_DIR))"
+	test -f "$(ZEPHYR_SDK_CMAKE_CONFIG)"
 	mkdir -p "$(ZEPHYR_SDK_GNU_DIR)"
-	tar -xJf "$(ZEPHYR_SDK_DOWNLOAD_DIR)/$(ZEPHYR_SDK_ARM_ARCHIVE)" -C "$(ZEPHYR_SDK_GNU_DIR)"
+	tar -xJf "$(ZEPHYR_SDK_DOWNLOAD_DIR)/$(ZEPHYR_SDK_ARM_ARCHIVE)" \
+		-C "$(ZEPHYR_SDK_GNU_DIR)"
+	test -x "$(ZEPHYR_SDK_GNU_DIR)/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc"
 	cd "$(ZEPHYR_SDK_DIR)" && ./setup.sh -h
 	touch "$(ZEPHYR_SDK_STAMP)"
 
