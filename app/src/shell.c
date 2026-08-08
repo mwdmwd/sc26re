@@ -515,6 +515,7 @@ static int cmd_haptics_status(const struct shell *shell, size_t argc, char **arg
 {
 	struct haptics_debug debug;
 	struct haptics_backend_debug backend;
+	int16_t master_gain_db;
 	int backend_err;
 
 	ARG_UNUSED(argc);
@@ -524,6 +525,10 @@ static int cmd_haptics_status(const struct shell *shell, size_t argc, char **arg
 	backend_err = haptics_backend_get_debug(&backend);
 	shell_print(shell, "ready=%u enabled=%u reports=%u last_report=0x%02x", debug.ready,
 	            debug.enabled, debug.reports_seen, debug.last_report_id);
+	if(ibex_setting_get(SETTING_HAPTIC_MASTER_GAIN_DB, &master_gain_db))
+	{
+		shell_print(shell, "volume=%d dB", master_gain_db);
+	}
 	shell_print(shell,
 	            "effects submitted=%u disabled=%u no_channel=%u queue_busy=%u "
 	            "last_effect=%u channels=0x%02x submit_err=%d",
@@ -540,6 +545,52 @@ static int cmd_haptics_status(const struct shell *shell, size_t argc, char **arg
 		            backend.play_requests, backend.play_started, backend.play_suppressed,
 		            backend.last_requested_channels, backend.last_physical_channels,
 		            backend.last_play_channels, backend.last_sample_count, backend.last_play_err);
+	}
+	return 0;
+}
+
+static int cmd_haptics_volume(const struct shell *shell, size_t argc, char **argv)
+{
+	int16_t gain_db;
+	int16_t min_gain_db;
+	int16_t max_gain_db;
+	int32_t requested_gain_db;
+	int err = 0;
+
+	if(!ibex_setting_get_meta(SETTING_HAPTIC_MASTER_GAIN_DB, IBEX_SETTING_MIN, &min_gain_db) ||
+	   !ibex_setting_get_meta(SETTING_HAPTIC_MASTER_GAIN_DB, IBEX_SETTING_MAX, &max_gain_db))
+	{
+		return -ENOENT;
+	}
+
+	if(argc > 1)
+	{
+		requested_gain_db = shell_strtol(argv[1], 10, &err);
+		if(err || requested_gain_db < min_gain_db || requested_gain_db > max_gain_db)
+		{
+			shell_error(shell, "volume must be %d..%d dB", min_gain_db, max_gain_db);
+			return -EINVAL;
+		}
+
+		err = ibex_setting_set(SETTING_HAPTIC_MASTER_GAIN_DB, (int16_t)requested_gain_db);
+		if(err)
+		{
+			return err;
+		}
+	}
+
+	if(!ibex_setting_get(SETTING_HAPTIC_MASTER_GAIN_DB, &gain_db))
+	{
+		return -ENOENT;
+	}
+	if(argc > 1)
+	{
+		shell_print(shell, "haptics volume set to %d dB", gain_db);
+	}
+	else
+	{
+		shell_print(shell, "haptics volume=%d dB (range %d..%d dB)", gain_db, min_gain_db,
+		            max_gain_db);
 	}
 	return 0;
 }
@@ -732,6 +783,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
     SHELL_CMD_ARG(tick, NULL, "Play tick [channel]", cmd_haptics_tick, 1, 1),
     SHELL_CMD_ARG(click, NULL, "Play click [channel]", cmd_haptics_click, 1, 1),
     SHELL_CMD_ARG(pulse, NULL, "Play pulse [channel]", cmd_haptics_pulse, 1, 1),
+    SHELL_CMD_ARG(volume, NULL, "Get/set master volume [gain_db]", cmd_haptics_volume, 1, 1),
     SHELL_SUBCMD_SET_END);
 
 #if CONFIG_IBEX_OLYMPUS

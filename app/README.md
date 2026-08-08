@@ -175,3 +175,15 @@ Battery level, charger detection, charging behavior, and OFW-matching idle curre
 ## Haptics
 
 The micro:bit target has a tiny PWM piezo beep for button-press feedback. The Ibex target has its primary touchpad PWM and secondary GRI-v3 I2S actuator paths enabled.
+
+The Ibex haptics master volume can be inspected or changed at runtime from the shell. It applies
+to both the primary touchpad actuators and secondary PCM streaming channels:
+
+```text
+steamctl haptics volume
+steamctl haptics volume -24
+steamctl haptics click primary
+```
+
+The gain range is -24 dB through +6 dB, with -3 dB as the reset default. The setting is also
+available as Ibex runtime setting 76 (`haptic_master_gain_db`).
