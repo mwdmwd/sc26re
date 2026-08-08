@@ -42,13 +42,14 @@ static enum radio_personality boot_chord_personality(void)
 	k_sleep(K_MSEC(BOOT_CHORD_SETTLE_MS));
 	buttons = hardware_read_buttons();
 
-	if(chord_pressed(buttons, CONTROLLER_BUTTON_RIGHT_SHOULDER, CONTROLLER_BUTTON_A))
-	{
-		return RADIO_PERSONALITY_ESB;
-	}
+	/* BLE wins the three-button chord so A+B also opens its pairing window. */
 	if(chord_pressed(buttons, CONTROLLER_BUTTON_RIGHT_SHOULDER, CONTROLLER_BUTTON_B))
 	{
 		return RADIO_PERSONALITY_BLE;
+	}
+	if(chord_pressed(buttons, CONTROLLER_BUTTON_RIGHT_SHOULDER, CONTROLLER_BUTTON_A))
+	{
+		return RADIO_PERSONALITY_ESB;
 	}
 
 	return radio_personality_get();

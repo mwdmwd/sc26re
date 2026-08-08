@@ -167,6 +167,8 @@ The firmware includes BLE, ESB, and USB support. Bluetooth uses Zephyr's Host an
 
 BLE and ESB share the radio, so only one radio personality runs per boot. Use the `steamctl radio` commands or the boot chords to select one, changing the radio personality reboots the controller. If coexistence is needed in the future, it will be added without MPSL, how hard could it be?
 
+BLE reconnects are restricted to bonded hosts. To pair a new host, hold A+B while powering on in BLE mode. This opens a 30-second pairing window. From another saved personality, hold RB+A+B while powering on to select BLE and open enrollment in one step. Without the physical boot chord, the controller does not start connectable advertising, not even if it is not bonded to any host.
+
 ## Power
 
 The current firmware has a power-button long-hold system-off path and sleep mode.
