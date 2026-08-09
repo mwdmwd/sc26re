@@ -40,15 +40,23 @@ struct pressure_calibration
 	uint16_t pressure_scale;
 } __packed;
 
+struct analog_calibration_snapshot
+{
+	struct trigger_calibration trigger_left;
+	struct trigger_calibration trigger_right;
+	struct stick_calibration stick_left;
+	struct stick_calibration stick_right;
+};
+
 bool calibration_trigger_valid(const struct trigger_calibration *cal);
 bool calibration_stick_valid(const struct stick_calibration *cal);
 bool calibration_pressure_valid(const struct pressure_calibration *cal);
 bool calibration_trigger_loaded(enum calibration_side side);
 bool calibration_stick_loaded(enum calibration_side side);
-const struct trigger_calibration *calibration_trigger(enum calibration_side side);
-const struct stick_calibration *calibration_stick(enum calibration_side side);
 bool calibration_pressure_loaded(enum calibration_side side);
-const struct pressure_calibration *calibration_pressure(enum calibration_side side);
+void calibration_analog_snapshot(struct analog_calibration_snapshot *snapshot);
+bool calibration_pressure_snapshot(enum calibration_side side,
+                                   struct pressure_calibration *snapshot);
 bool calibration_battery_voltage_offset_loaded(void);
 int16_t calibration_battery_voltage_offset_mv(void);
 int calibration_load_settings(void);

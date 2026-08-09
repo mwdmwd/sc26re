@@ -484,25 +484,28 @@ int analog_read_report(struct controller_report *report)
 		}
 	}
 
-	const struct stick_calibration *left_stick = calibration_stick(CALIBRATION_LEFT);
-	const struct stick_calibration *right_stick = calibration_stick(CALIBRATION_RIGHT);
-	const struct trigger_calibration *left_trigger = calibration_trigger(CALIBRATION_LEFT);
-	const struct trigger_calibration *right_trigger = calibration_trigger(CALIBRATION_RIGHT);
+	struct analog_calibration_snapshot calibration;
 
-	report->stick_left_x =
-	    scale_stick_axis(averaged[ANALOG_STICK_LEFT_X], left_stick->x_min, left_stick->x_max,
-	                     left_stick->x_center_min, left_stick->x_center_max);
-	report->stick_left_y =
-	    scale_stick_axis(averaged[ANALOG_STICK_LEFT_Y], left_stick->y_min, left_stick->y_max,
-	                     left_stick->y_center_min, left_stick->y_center_max);
+	calibration_analog_snapshot(&calibration);
+
+	report->stick_left_x = scale_stick_axis(
+	    averaged[ANALOG_STICK_LEFT_X], calibration.stick_left.x_min, calibration.stick_left.x_max,
+	    calibration.stick_left.x_center_min, calibration.stick_left.x_center_max);
+	report->stick_left_y = scale_stick_axis(
+	    averaged[ANALOG_STICK_LEFT_Y], calibration.stick_left.y_min, calibration.stick_left.y_max,
+	    calibration.stick_left.y_center_min, calibration.stick_left.y_center_max);
 	report->stick_right_x =
-	    scale_stick_axis(averaged[ANALOG_STICK_RIGHT_X], right_stick->x_min, right_stick->x_max,
-	                     right_stick->x_center_min, right_stick->x_center_max);
+	    scale_stick_axis(averaged[ANALOG_STICK_RIGHT_X], calibration.stick_right.x_min,
+	                     calibration.stick_right.x_max, calibration.stick_right.x_center_min,
+	                     calibration.stick_right.x_center_max);
 	report->stick_right_y =
-	    scale_stick_axis(averaged[ANALOG_STICK_RIGHT_Y], right_stick->y_min, right_stick->y_max,
-	                     right_stick->y_center_min, right_stick->y_center_max);
-	report->trigger_left = trigger_to_report(averaged[ANALOG_TRIGGER_LEFT], left_trigger);
-	report->trigger_right = trigger_to_report(averaged[ANALOG_TRIGGER_RIGHT], right_trigger);
+	    scale_stick_axis(averaged[ANALOG_STICK_RIGHT_Y], calibration.stick_right.y_min,
+	                     calibration.stick_right.y_max, calibration.stick_right.y_center_min,
+	                     calibration.stick_right.y_center_max);
+	report->trigger_left =
+	    trigger_to_report(averaged[ANALOG_TRIGGER_LEFT], &calibration.trigger_left);
+	report->trigger_right =
+	    trigger_to_report(averaged[ANALOG_TRIGGER_RIGHT], &calibration.trigger_right);
 	if(trigger_click_active(report->trigger_left, &trigger_left_click_latched))
 	{
 		report->buttons |= BIT(CONTROLLER_BUTTON_LEFT_TRIGGER_CLICK);

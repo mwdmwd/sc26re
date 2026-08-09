@@ -135,20 +135,19 @@ static int32_t scaled_setting_or_default(uint8_t id, int16_t fallback)
 static bool pad_pressure_calibration(bool right, float *low, float *high, float *scale)
 {
 	enum calibration_side side = right ? CALIBRATION_RIGHT : CALIBRATION_LEFT;
+	struct pressure_calibration calibration;
 
-	if(calibration_pressure_loaded(side))
+	if(calibration_pressure_snapshot(side, &calibration))
 	{
-		const struct pressure_calibration *cal = calibration_pressure(side);
-
-		if(cal->mode == 128U)
+		if(calibration.mode == 128U)
 		{
 			*low = 0.0f;
-			*high = (float)cal->max - (float)cal->min;
+			*high = (float)calibration.max - (float)calibration.min;
 		}
-		else if(cal->mode == 1U)
+		else if(calibration.mode == 1U)
 		{
-			*low = cal->min;
-			*high = cal->max;
+			*low = calibration.min;
+			*high = calibration.max;
 		}
 		else
 		{
@@ -157,7 +156,7 @@ static bool pad_pressure_calibration(bool right, float *low, float *high, float 
 			*scale = 0.0f;
 			return false;
 		}
-		*scale = cal->pressure_scale;
+		*scale = calibration.pressure_scale;
 		return *scale != 0.0f;
 	}
 

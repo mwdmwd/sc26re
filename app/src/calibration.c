@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/storage/flash_map.h>
@@ -18,48 +19,32 @@ LOG_MODULE_REGISTER(calibration);
 #define IMU_GYRO_BIAS_PATH "cal/sensors/gyroscope/bias"
 #define BATTERY_VOLTAGE_OFFSET_LIMIT_MV 500
 
-static struct trigger_calibration trigger_left = {
-	.type = 129,
+struct side_calibration
+{
+	struct trigger_calibration trigger;
+	struct stick_calibration stick;
+	struct pressure_calibration pressure;
+	bool trigger_loaded;
+	bool stick_loaded;
+	bool pressure_loaded;
+	bool trigger_dirty;
+	bool pressure_dirty;
 };
-static struct trigger_calibration trigger_right = {
-	.type = 129,
+
+static struct side_calibration sides[2] = {
+	[CALIBRATION_LEFT] = {
+		.trigger = { .type = 129 },
+		.stick = { .type = 129 },
+	},
+	[CALIBRATION_RIGHT] = {
+		.trigger = { .type = 129 },
+		.stick = { .type = 129 },
+	},
 };
-static struct stick_calibration stick_left = {
-	.type = 129,
-};
-static struct stick_calibration stick_right = {
-	.type = 129,
-};
-static struct pressure_calibration pressure_left;
-static struct pressure_calibration pressure_right;
 static int16_t battery_voltage_offset_mv;
-
-static bool trigger_left_loaded;
-static bool trigger_right_loaded;
-static bool stick_left_loaded;
-static bool stick_right_loaded;
-static bool pressure_left_loaded;
-static bool pressure_right_loaded;
 static bool battery_voltage_offset_loaded;
-static bool trigger_left_dirty;
-static bool trigger_right_dirty;
-static bool pressure_left_dirty;
-static bool pressure_right_dirty;
 
-static struct trigger_calibration *trigger_for_side(enum calibration_side side)
-{
-	return side == CALIBRATION_RIGHT ? &trigger_right : &trigger_left;
-}
-
-static struct stick_calibration *stick_for_side(enum calibration_side side)
-{
-	return side == CALIBRATION_RIGHT ? &stick_right : &stick_left;
-}
-
-static struct pressure_calibration *pressure_for_side(enum calibration_side side)
-{
-	return side == CALIBRATION_RIGHT ? &pressure_right : &pressure_left;
-}
+K_MUTEX_DEFINE(calibration_mutex);
 
 bool calibration_trigger_valid(const struct trigger_calibration *cal)
 {
@@ -85,42 +70,74 @@ bool calibration_pressure_valid(const struct pressure_calibration *cal)
 
 bool calibration_trigger_loaded(enum calibration_side side)
 {
-	return side == CALIBRATION_RIGHT ? trigger_right_loaded : trigger_left_loaded;
+	bool loaded;
+
+	k_mutex_lock(&calibration_mutex, K_FOREVER);
+	loaded = sides[side].trigger_loaded;
+	k_mutex_unlock(&calibration_mutex);
+	return loaded;
 }
 
 bool calibration_stick_loaded(enum calibration_side side)
 {
-	return side == CALIBRATION_RIGHT ? stick_right_loaded : stick_left_loaded;
-}
+	bool loaded;
 
-const struct trigger_calibration *calibration_trigger(enum calibration_side side)
-{
-	return trigger_for_side(side);
-}
-
-const struct stick_calibration *calibration_stick(enum calibration_side side)
-{
-	return stick_for_side(side);
+	k_mutex_lock(&calibration_mutex, K_FOREVER);
+	loaded = sides[side].stick_loaded;
+	k_mutex_unlock(&calibration_mutex);
+	return loaded;
 }
 
 bool calibration_pressure_loaded(enum calibration_side side)
 {
-	return side == CALIBRATION_RIGHT ? pressure_right_loaded : pressure_left_loaded;
+	bool loaded;
+
+	k_mutex_lock(&calibration_mutex, K_FOREVER);
+	loaded = sides[side].pressure_loaded;
+	k_mutex_unlock(&calibration_mutex);
+	return loaded;
 }
 
-const struct pressure_calibration *calibration_pressure(enum calibration_side side)
+void calibration_analog_snapshot(struct analog_calibration_snapshot *snapshot)
 {
-	return pressure_for_side(side);
+	k_mutex_lock(&calibration_mutex, K_FOREVER);
+	snapshot->trigger_left = sides[CALIBRATION_LEFT].trigger;
+	snapshot->trigger_right = sides[CALIBRATION_RIGHT].trigger;
+	snapshot->stick_left = sides[CALIBRATION_LEFT].stick;
+	snapshot->stick_right = sides[CALIBRATION_RIGHT].stick;
+	k_mutex_unlock(&calibration_mutex);
+}
+
+bool calibration_pressure_snapshot(enum calibration_side side,
+                                   struct pressure_calibration *snapshot)
+{
+	bool loaded;
+
+	k_mutex_lock(&calibration_mutex, K_FOREVER);
+	*snapshot = sides[side].pressure;
+	loaded = sides[side].pressure_loaded;
+	k_mutex_unlock(&calibration_mutex);
+	return loaded;
 }
 
 bool calibration_battery_voltage_offset_loaded(void)
 {
-	return battery_voltage_offset_loaded;
+	bool loaded;
+
+	k_mutex_lock(&calibration_mutex, K_FOREVER);
+	loaded = battery_voltage_offset_loaded;
+	k_mutex_unlock(&calibration_mutex);
+	return loaded;
 }
 
 int16_t calibration_battery_voltage_offset_mv(void)
 {
-	return battery_voltage_offset_mv;
+	int16_t offset_mv;
+
+	k_mutex_lock(&calibration_mutex, K_FOREVER);
+	offset_mv = battery_voltage_offset_mv;
+	k_mutex_unlock(&calibration_mutex);
+	return offset_mv;
 }
 
 static bool battery_voltage_offset_valid(int16_t offset_mv)
@@ -149,8 +166,10 @@ static int load_battery_voltage_offset(settings_read_cb read_cb, void *cb_arg)
 		return 0;
 	}
 
+	k_mutex_lock(&calibration_mutex, K_FOREVER);
 	battery_voltage_offset_mv = loaded;
 	battery_voltage_offset_loaded = true;
+	k_mutex_unlock(&calibration_mutex);
 	LOG_INF("Loaded battery-meter voltage offset: %d mV", loaded);
 	return 0;
 }
@@ -175,15 +194,10 @@ static int load_trigger_setting(enum calibration_side side, settings_read_cb rea
 		return 0;
 	}
 
-	*trigger_for_side(side) = loaded;
-	if(side == CALIBRATION_RIGHT)
-	{
-		trigger_right_loaded = true;
-	}
-	else
-	{
-		trigger_left_loaded = true;
-	}
+	k_mutex_lock(&calibration_mutex, K_FOREVER);
+	sides[side].trigger = loaded;
+	sides[side].trigger_loaded = true;
+	k_mutex_unlock(&calibration_mutex);
 	LOG_INF("Loaded %s trigger calibration: pressed=%u, idle=%u, inverted=%u",
 	        side == CALIBRATION_RIGHT ? "right" : "left", loaded.pressed, loaded.idle,
 	        loaded.inverted);
@@ -210,15 +224,10 @@ static int load_stick_setting(enum calibration_side side, settings_read_cb read_
 		return 0;
 	}
 
-	*stick_for_side(side) = loaded;
-	if(side == CALIBRATION_RIGHT)
-	{
-		stick_right_loaded = true;
-	}
-	else
-	{
-		stick_left_loaded = true;
-	}
+	k_mutex_lock(&calibration_mutex, K_FOREVER);
+	sides[side].stick = loaded;
+	sides[side].stick_loaded = true;
+	k_mutex_unlock(&calibration_mutex);
 	LOG_INF("Loaded %s stick calibration: x_min=%u, x_center=%u..%u, x_max=%u, y_min=%u, "
 	        "y_center=%u..%u, y_max=%u",
 	        side == CALIBRATION_RIGHT ? "right" : "left", loaded.x_min, loaded.x_center_min,
@@ -230,8 +239,6 @@ static int load_stick_setting(enum calibration_side side, settings_read_cb read_
 static int load_pressure_setting(enum calibration_side side, settings_read_cb read_cb, void *cb_arg)
 {
 	struct pressure_calibration loaded;
-	struct pressure_calibration *current = pressure_for_side(side);
-	bool *loaded_flag = side == CALIBRATION_RIGHT ? &pressure_right_loaded : &pressure_left_loaded;
 	ssize_t read_len = read_cb(cb_arg, &loaded, sizeof(loaded));
 
 	if(read_len < 0)
@@ -244,24 +251,30 @@ static int load_pressure_setting(enum calibration_side side, settings_read_cb re
 	}
 	if(loaded.mode == 0U)
 	{
-		memset(current, 0, sizeof(*current));
-		*loaded_flag = false;
+		k_mutex_lock(&calibration_mutex, K_FOREVER);
+		memset(&sides[side].pressure, 0, sizeof(loaded));
+		sides[side].pressure_loaded = false;
+		k_mutex_unlock(&calibration_mutex);
 		LOG_INF("Loaded cleared %s pressure calibration",
 		        side == CALIBRATION_RIGHT ? "right" : "left");
 		return 0;
 	}
 	if(!calibration_pressure_valid(&loaded))
 	{
-		memset(current, 0, sizeof(*current));
-		*loaded_flag = false;
+		k_mutex_lock(&calibration_mutex, K_FOREVER);
+		memset(&sides[side].pressure, 0, sizeof(loaded));
+		sides[side].pressure_loaded = false;
+		k_mutex_unlock(&calibration_mutex);
 		LOG_WRN("Ignoring invalid %s pressure calibration: mode=%u min=%d max=%d scale=%u",
 		        side == CALIBRATION_RIGHT ? "right" : "left", loaded.mode, loaded.min, loaded.max,
 		        loaded.pressure_scale);
 		return 0;
 	}
 
-	*current = loaded;
-	*loaded_flag = true;
+	k_mutex_lock(&calibration_mutex, K_FOREVER);
+	sides[side].pressure = loaded;
+	sides[side].pressure_loaded = true;
+	k_mutex_unlock(&calibration_mutex);
 	LOG_INF("Loaded %s pressure calibration: mode=%u min=%d max=%d scale=%u",
 	        side == CALIBRATION_RIGHT ? "right" : "left", loaded.mode, loaded.min, loaded.max,
 	        loaded.pressure_scale);
@@ -480,10 +493,73 @@ int calibration_import_valve_storage(void)
 	volt_offset_found = err == sizeof(ofw_volt_offset);
 	flash_area_close(fa);
 
-	if(!trigger_left_loaded && trg_l_found && calibration_trigger_valid(&ofw_trg_l))
+	if(volt_offset_found &&
+	   !battery_voltage_offset_valid(ofw_volt_offset) &&
+	   !calibration_battery_voltage_offset_loaded())
 	{
-		trigger_left = ofw_trg_l;
-		trigger_left_loaded = true;
+		LOG_WRN("Ignoring implausible OFW cal/volt_offset: %d mV", ofw_volt_offset);
+	}
+
+	k_mutex_lock(&calibration_mutex, K_FOREVER);
+	trg_l_found = trg_l_found &&
+	              calibration_trigger_valid(&ofw_trg_l) &&
+	              !sides[CALIBRATION_LEFT].trigger_loaded;
+	if(trg_l_found)
+	{
+		sides[CALIBRATION_LEFT].trigger = ofw_trg_l;
+		sides[CALIBRATION_LEFT].trigger_loaded = true;
+	}
+	trg_r_found = trg_r_found &&
+	              calibration_trigger_valid(&ofw_trg_r) &&
+	              !sides[CALIBRATION_RIGHT].trigger_loaded;
+	if(trg_r_found)
+	{
+		sides[CALIBRATION_RIGHT].trigger = ofw_trg_r;
+		sides[CALIBRATION_RIGHT].trigger_loaded = true;
+	}
+	joy_l_found =
+	    joy_l_found && calibration_stick_valid(&ofw_joy_l) && !sides[CALIBRATION_LEFT].stick_loaded;
+	if(joy_l_found)
+	{
+		sides[CALIBRATION_LEFT].stick = ofw_joy_l;
+		sides[CALIBRATION_LEFT].stick_loaded = true;
+	}
+	joy_r_found = joy_r_found &&
+	              calibration_stick_valid(&ofw_joy_r) &&
+	              !sides[CALIBRATION_RIGHT].stick_loaded;
+	if(joy_r_found)
+	{
+		sides[CALIBRATION_RIGHT].stick = ofw_joy_r;
+		sides[CALIBRATION_RIGHT].stick_loaded = true;
+	}
+	prs_l_found = prs_l_found &&
+	              calibration_pressure_valid(&ofw_prs_l) &&
+	              !sides[CALIBRATION_LEFT].pressure_loaded;
+	if(prs_l_found)
+	{
+		sides[CALIBRATION_LEFT].pressure = ofw_prs_l;
+		sides[CALIBRATION_LEFT].pressure_loaded = true;
+	}
+	prs_r_found = prs_r_found &&
+	              calibration_pressure_valid(&ofw_prs_r) &&
+	              !sides[CALIBRATION_RIGHT].pressure_loaded;
+	if(prs_r_found)
+	{
+		sides[CALIBRATION_RIGHT].pressure = ofw_prs_r;
+		sides[CALIBRATION_RIGHT].pressure_loaded = true;
+	}
+	volt_offset_found = volt_offset_found &&
+	                    battery_voltage_offset_valid(ofw_volt_offset) &&
+	                    !battery_voltage_offset_loaded;
+	if(volt_offset_found)
+	{
+		battery_voltage_offset_mv = ofw_volt_offset;
+		battery_voltage_offset_loaded = true;
+	}
+	k_mutex_unlock(&calibration_mutex);
+
+	if(trg_l_found)
+	{
 		err = save_setting("cal/trg_l", &ofw_trg_l, sizeof(ofw_trg_l));
 		if(!err)
 		{
@@ -491,10 +567,8 @@ int calibration_import_valve_storage(void)
 			        ofw_trg_l.idle, ofw_trg_l.inverted);
 		}
 	}
-	if(!trigger_right_loaded && trg_r_found && calibration_trigger_valid(&ofw_trg_r))
+	if(trg_r_found)
 	{
-		trigger_right = ofw_trg_r;
-		trigger_right_loaded = true;
 		err = save_setting("cal/trg_r", &ofw_trg_r, sizeof(ofw_trg_r));
 		if(!err)
 		{
@@ -502,10 +576,8 @@ int calibration_import_valve_storage(void)
 			        ofw_trg_r.idle, ofw_trg_r.inverted);
 		}
 	}
-	if(!stick_left_loaded && joy_l_found && calibration_stick_valid(&ofw_joy_l))
+	if(joy_l_found)
 	{
-		stick_left = ofw_joy_l;
-		stick_left_loaded = true;
 		err = save_setting("cal/joy_l", &ofw_joy_l, sizeof(ofw_joy_l));
 		if(!err)
 		{
@@ -516,10 +588,8 @@ int calibration_import_valve_storage(void)
 			        ofw_joy_l.y_center_max, ofw_joy_l.y_max);
 		}
 	}
-	if(!stick_right_loaded && joy_r_found && calibration_stick_valid(&ofw_joy_r))
+	if(joy_r_found)
 	{
-		stick_right = ofw_joy_r;
-		stick_right_loaded = true;
 		err = save_setting("cal/joy_r", &ofw_joy_r, sizeof(ofw_joy_r));
 		if(!err)
 		{
@@ -530,10 +600,8 @@ int calibration_import_valve_storage(void)
 			        ofw_joy_r.y_center_max, ofw_joy_r.y_max);
 		}
 	}
-	if(!pressure_left_loaded && prs_l_found && calibration_pressure_valid(&ofw_prs_l))
+	if(prs_l_found)
 	{
-		pressure_left = ofw_prs_l;
-		pressure_left_loaded = true;
 		err = save_setting("cal/prs_l", &ofw_prs_l, sizeof(ofw_prs_l));
 		if(!err)
 		{
@@ -541,10 +609,8 @@ int calibration_import_valve_storage(void)
 			        ofw_prs_l.min, ofw_prs_l.max, ofw_prs_l.pressure_scale);
 		}
 	}
-	if(!pressure_right_loaded && prs_r_found && calibration_pressure_valid(&ofw_prs_r))
+	if(prs_r_found)
 	{
-		pressure_right = ofw_prs_r;
-		pressure_right_loaded = true;
 		err = save_setting("cal/prs_r", &ofw_prs_r, sizeof(ofw_prs_r));
 		if(!err)
 		{
@@ -552,16 +618,8 @@ int calibration_import_valve_storage(void)
 			        ofw_prs_r.min, ofw_prs_r.max, ofw_prs_r.pressure_scale);
 		}
 	}
-	if(!battery_voltage_offset_loaded &&
-	   volt_offset_found &&
-	   !battery_voltage_offset_valid(ofw_volt_offset))
+	if(volt_offset_found)
 	{
-		LOG_WRN("Ignoring implausible OFW cal/volt_offset: %d mV", ofw_volt_offset);
-	}
-	else if(!battery_voltage_offset_loaded && volt_offset_found)
-	{
-		battery_voltage_offset_mv = ofw_volt_offset;
-		battery_voltage_offset_loaded = true;
 		err = save_setting("cal/volt_offset", &ofw_volt_offset, sizeof(ofw_volt_offset));
 		if(err)
 		{
@@ -590,14 +648,17 @@ int calibration_import_valve_storage(void)
 bool calibration_read_trigger(enum calibration_side side, uint8_t *buf, size_t capacity,
                               size_t *len)
 {
-	const struct trigger_calibration *value = trigger_for_side(side);
+	struct trigger_calibration value;
 
-	if(capacity < sizeof(*value))
+	if(capacity < sizeof(value))
 	{
 		return false;
 	}
-	memcpy(buf, value, sizeof(*value));
-	*len = sizeof(*value);
+	k_mutex_lock(&calibration_mutex, K_FOREVER);
+	value = sides[side].trigger;
+	k_mutex_unlock(&calibration_mutex);
+	memcpy(buf, &value, sizeof(value));
+	*len = sizeof(value);
 	return true;
 }
 
@@ -615,18 +676,11 @@ int calibration_stage_trigger(enum calibration_side side, const uint8_t *value, 
 		return -EINVAL;
 	}
 
-	if(side == CALIBRATION_LEFT)
-	{
-		trigger_left = staged;
-		trigger_left_loaded = true;
-		trigger_left_dirty = true;
-	}
-	else
-	{
-		trigger_right = staged;
-		trigger_right_loaded = true;
-		trigger_right_dirty = true;
-	}
+	k_mutex_lock(&calibration_mutex, K_FOREVER);
+	sides[side].trigger = staged;
+	sides[side].trigger_loaded = true;
+	sides[side].trigger_dirty = true;
+	k_mutex_unlock(&calibration_mutex);
 
 	LOG_INF("staged %s trigger calibration: pressed=%u, idle=%u, inverted=%u",
 	        side == CALIBRATION_RIGHT ? "right" : "left", staged.pressed, staged.idle,
@@ -636,55 +690,59 @@ int calibration_stage_trigger(enum calibration_side side, const uint8_t *value, 
 
 int calibration_commit_trigger(enum calibration_side side)
 {
-	const char *path;
-	const void *value;
-	bool *dirty;
-	size_t len;
+	const char *path = side == CALIBRATION_RIGHT ? "cal/trg_r" : "cal/trg_l";
+	struct trigger_calibration value;
+	bool value_is_current;
+	bool needs_commit;
 	int err;
 
-	if(side == CALIBRATION_LEFT)
-	{
-		path = "cal/trg_l";
-		value = &trigger_left;
-		dirty = &trigger_left_dirty;
-		len = sizeof(trigger_left);
-	}
-	else
-	{
-		path = "cal/trg_r";
-		value = &trigger_right;
-		dirty = &trigger_right_dirty;
-		len = sizeof(trigger_right);
-	}
-
-	if(!*dirty)
+	k_mutex_lock(&calibration_mutex, K_FOREVER);
+	needs_commit = sides[side].trigger_dirty;
+	value = sides[side].trigger;
+	k_mutex_unlock(&calibration_mutex);
+	if(!needs_commit)
 	{
 		return 0;
 	}
 
-	err = save_setting(path, value, len);
+	err = save_setting(path, &value, sizeof(value));
 	if(err)
 	{
 		LOG_ERR("failed to commit %s: %d", path, err);
 		return err;
 	}
 
-	*dirty = false;
-	LOG_INF("committed %s", path);
+	k_mutex_lock(&calibration_mutex, K_FOREVER);
+	value_is_current = memcmp(&sides[side].trigger, &value, sizeof(value)) == 0;
+	if(value_is_current)
+	{
+		sides[side].trigger_dirty = false;
+	}
+	k_mutex_unlock(&calibration_mutex);
+	LOG_INF("committed %s%s", path, value_is_current ? "" : ", newer value remains staged");
 	return 0;
 }
 
 bool calibration_read_pressure(enum calibration_side side, uint8_t *buf, size_t capacity,
                                size_t *len)
 {
-	const struct pressure_calibration *value = pressure_for_side(side);
+	struct pressure_calibration value;
+	bool loaded;
 
-	if(!calibration_pressure_loaded(side) || capacity < sizeof(*value))
+	if(capacity < sizeof(value))
 	{
 		return false;
 	}
-	memcpy(buf, value, sizeof(*value));
-	*len = sizeof(*value);
+	k_mutex_lock(&calibration_mutex, K_FOREVER);
+	loaded = sides[side].pressure_loaded;
+	value = sides[side].pressure;
+	k_mutex_unlock(&calibration_mutex);
+	if(!loaded)
+	{
+		return false;
+	}
+	memcpy(buf, &value, sizeof(value));
+	*len = sizeof(value);
 	return true;
 }
 
@@ -708,17 +766,11 @@ int calibration_stage_pressure(enum calibration_side side, const uint8_t *value,
 		memset(&staged, 0, sizeof(staged));
 	}
 
-	*pressure_for_side(side) = staged;
-	if(side == CALIBRATION_LEFT)
-	{
-		pressure_left_loaded = !clear;
-		pressure_left_dirty = true;
-	}
-	else
-	{
-		pressure_right_loaded = !clear;
-		pressure_right_dirty = true;
-	}
+	k_mutex_lock(&calibration_mutex, K_FOREVER);
+	sides[side].pressure = staged;
+	sides[side].pressure_loaded = !clear;
+	sides[side].pressure_dirty = true;
+	k_mutex_unlock(&calibration_mutex);
 
 	LOG_INF("staged %s pressure calibration: mode=%u min=%d max=%d scale=%u",
 	        side == CALIBRATION_RIGHT ? "right" : "left", staged.mode, staged.min, staged.max,
@@ -728,39 +780,34 @@ int calibration_stage_pressure(enum calibration_side side, const uint8_t *value,
 
 int calibration_commit_pressure(enum calibration_side side)
 {
-	const char *path;
-	const void *value;
-	bool *dirty;
-	size_t len;
+	const char *path = side == CALIBRATION_RIGHT ? "cal/prs_r" : "cal/prs_l";
+	struct pressure_calibration value;
+	bool value_is_current;
+	bool needs_commit;
 	int err;
 
-	if(side == CALIBRATION_LEFT)
-	{
-		path = "cal/prs_l";
-		value = &pressure_left;
-		dirty = &pressure_left_dirty;
-		len = sizeof(pressure_left);
-	}
-	else
-	{
-		path = "cal/prs_r";
-		value = &pressure_right;
-		dirty = &pressure_right_dirty;
-		len = sizeof(pressure_right);
-	}
-
-	if(!*dirty)
+	k_mutex_lock(&calibration_mutex, K_FOREVER);
+	needs_commit = sides[side].pressure_dirty;
+	value = sides[side].pressure;
+	k_mutex_unlock(&calibration_mutex);
+	if(!needs_commit)
 	{
 		return 0;
 	}
-	err = save_setting(path, value, len);
+	err = save_setting(path, &value, sizeof(value));
 	if(err)
 	{
 		LOG_ERR("failed to commit %s: %d", path, err);
 		return err;
 	}
 
-	*dirty = false;
-	LOG_INF("committed %s", path);
+	k_mutex_lock(&calibration_mutex, K_FOREVER);
+	value_is_current = memcmp(&sides[side].pressure, &value, sizeof(value)) == 0;
+	if(value_is_current)
+	{
+		sides[side].pressure_dirty = false;
+	}
+	k_mutex_unlock(&calibration_mutex);
+	LOG_INF("committed %s%s", path, value_is_current ? "" : ", newer value remains staged");
 	return 0;
 }
