@@ -48,6 +48,7 @@ enum
 	ESB_MAX_PAYLOAD_SIZE = 128,
 	ESB_CHANNEL_MAP_SIZE = 4,
 	ESB_CHANNEL_UNUSED = 0xff,
+	ESB_RF_CHANNEL_MAX = 100,
 	/* OFW stores these as 32.768 kHz ticks: */
 	ESB_CHANNEL_HOLD_MS = 10,          /* 328 ticks */
 	ESB_CHANNEL_SCAN_INTERVAL_MS = 13, /* 426 ticks */
@@ -65,6 +66,21 @@ struct esb_input_report_entry
 	uint8_t id;
 	uint8_t len;
 	uint8_t data[ESB_INPUT_REPORT_MAX_BODY_SIZE];
+};
+
+enum esb_pending_session_state
+{
+	ESB_PENDING_SESSION_IDLE,
+	ESB_PENDING_SESSION_QUEUED,
+	ESB_PENDING_SESSION_APPLYING,
+};
+
+struct esb_pending_session
+{
+	uint8_t channel;
+	uint8_t base[4];
+	uint8_t prefix;
+	enum esb_pending_session_state state;
 };
 
 static const uint8_t discovery_base[] = { 'i', 'b', 'e', 'x' };
@@ -89,11 +105,9 @@ static uint8_t input_report_queue_head;
 static uint8_t input_report_queue_count;
 static uint32_t input_report_queue_generation;
 static bool latest_input_valid;
-static bool session_pending;
 static bool legacy_feature_fallback_pending;
-static uint8_t pending_channel;
-static uint8_t pending_base[4];
-static uint8_t pending_prefix;
+static struct k_spinlock pending_session_lock;
+static struct esb_pending_session pending_session;
 static uint8_t current_channel = ESB_DISCOVERY_CHANNEL;
 static uint8_t channel_map[ESB_CHANNEL_MAP_SIZE] = {
 	ESB_DISCOVERY_CHANNEL,
@@ -107,8 +121,7 @@ static uint8_t pending_map_channel = ESB_CHANNEL_UNUSED;
 static uint32_t pending_map_generation;
 static atomic_t last_host_rx_ms;
 static atomic_t session_generation;
-static bool session_connected;
-static atomic_t session_connected_public;
+static atomic_t session_connected;
 static atomic_t bond_change_pending;
 static bool esb_started;
 static uint32_t host_frames_received;
@@ -138,6 +151,60 @@ static void channel_scan_work_handler(struct k_work *work);
 K_WORK_DELAYABLE_DEFINE(feature_response_fallback_work, feature_response_fallback_work_handler);
 K_WORK_DELAYABLE_DEFINE(bond_change_work, bond_change_work_handler);
 K_WORK_DELAYABLE_DEFINE(channel_scan_work, channel_scan_work_handler);
+
+static bool pending_session_busy(void)
+{
+	k_spinlock_key_t key;
+	bool busy;
+
+	key = k_spin_lock(&pending_session_lock);
+	busy = pending_session.state != ESB_PENDING_SESSION_IDLE;
+	k_spin_unlock(&pending_session_lock, key);
+	return busy;
+}
+
+static bool pending_session_queue(const struct valve_esb_payload *payload)
+{
+	k_spinlock_key_t key;
+	bool queued = false;
+
+	key = k_spin_lock(&pending_session_lock);
+	if(pending_session.state == ESB_PENDING_SESSION_IDLE)
+	{
+		pending_session.channel = payload->data[9];
+		memcpy(pending_session.base, &payload->data[13], sizeof(pending_session.base));
+		pending_session.prefix = payload->data[17];
+		pending_session.state = ESB_PENDING_SESSION_QUEUED;
+		queued = true;
+	}
+	k_spin_unlock(&pending_session_lock, key);
+	return queued;
+}
+
+static bool pending_session_take(struct esb_pending_session *session)
+{
+	k_spinlock_key_t key;
+	bool taken = false;
+
+	key = k_spin_lock(&pending_session_lock);
+	if(pending_session.state == ESB_PENDING_SESSION_QUEUED)
+	{
+		*session = pending_session;
+		pending_session.state = ESB_PENDING_SESSION_APPLYING;
+		taken = true;
+	}
+	k_spin_unlock(&pending_session_lock, key);
+	return taken;
+}
+
+static void pending_session_clear(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&pending_session_lock);
+
+	memset(&pending_session, 0, sizeof(pending_session));
+	pending_session.state = ESB_PENDING_SESSION_IDLE;
+	k_spin_unlock(&pending_session_lock, key);
+}
 
 static void clear_session_reports(void)
 {
@@ -198,7 +265,7 @@ static int queue_payload(const struct valve_esb_payload *payload)
 {
 	int err;
 
-	if(atomic_get(&session_connected_public) == 0 || atomic_get(&bond_change_pending) != 0)
+	if(atomic_get(&session_connected) == 0 || atomic_get(&bond_change_pending) != 0)
 	{
 		return -ECANCELED;
 	}
@@ -269,7 +336,7 @@ static void channel_map_work_handler(struct k_work *work)
 	k_spin_unlock(&channel_map_lock, key);
 
 	if(!esb_started ||
-	   atomic_get(&session_connected_public) == 0 ||
+	   atomic_get(&session_connected) == 0 ||
 	   atomic_get(&bond_change_pending) != 0 ||
 	   generation != (uint32_t)atomic_get(&session_generation))
 	{
@@ -280,7 +347,7 @@ static void channel_map_work_handler(struct k_work *work)
 	k_usleep(500);
 
 	if(!esb_started ||
-	   atomic_get(&session_connected_public) == 0 ||
+	   atomic_get(&session_connected) == 0 ||
 	   atomic_get(&bond_change_pending) != 0 ||
 	   generation != (uint32_t)atomic_get(&session_generation))
 	{
@@ -390,18 +457,24 @@ static void queue_latest_input(void)
 
 static void session_work_handler(struct k_work *work)
 {
+	struct esb_pending_session session;
+
 	ARG_UNUSED(work);
 
-	if(!esb_started || !session_pending || atomic_get(&bond_change_pending) != 0)
+	if(!esb_started || atomic_get(&bond_change_pending) != 0)
+	{
+		pending_session_clear();
+		return;
+	}
+	if(!pending_session_take(&session))
 	{
 		return;
 	}
 
 	/* A new E1 replaces the old private session. Stop producers and discard
 	 * relative input before readdressing so it cannot leak across reconnects. */
-	atomic_clear(&session_connected_public);
+	atomic_clear(&session_connected);
 	atomic_inc(&session_generation);
-	session_connected = false;
 	(void)k_work_cancel(&channel_map_work);
 	(void)k_work_cancel_delayable(&channel_scan_work);
 	clear_session_reports();
@@ -409,23 +482,22 @@ static void session_work_handler(struct k_work *work)
 	(void)valve_esb_backend_stop_rx();
 	(void)valve_esb_backend_flush_rx();
 	(void)valve_esb_backend_flush_tx();
-	(void)valve_esb_backend_set_rf_channel(pending_channel);
-	(void)valve_esb_backend_set_base_address_0(pending_base);
-	(void)valve_esb_backend_set_prefixes(&pending_prefix, 1);
-	current_channel = pending_channel;
-	reset_channel_map(pending_channel);
+	(void)valve_esb_backend_set_rf_channel(session.channel);
+	(void)valve_esb_backend_set_base_address_0(session.base);
+	(void)valve_esb_backend_set_prefixes(&session.prefix, 1);
+	current_channel = session.channel;
+	reset_channel_map(session.channel);
 	atomic_set(&last_host_rx_ms, (atomic_val_t)k_uptime_get_32());
-	session_connected = true;
-	session_pending = false;
 	(void)valve_esb_backend_start_rx();
-	atomic_set(&session_connected_public, 1);
+	atomic_set(&session_connected, 1);
+	pending_session_clear();
 	(void)k_work_reschedule(&channel_scan_work, K_MSEC(ESB_CHANNEL_HOLD_MS));
 	/* OFW activates input only after private RX is running. The reset wakes the
 	 * input loop, whose first fresh full-state sample builds the first F1. */
 	lizard_transport_reset();
 
-	LOG_INF("ESB session: channel %u, base %02x%02x%02x%02x, prefix %02x", pending_channel,
-	        pending_base[0], pending_base[1], pending_base[2], pending_base[3], pending_prefix);
+	LOG_INF("ESB session: channel %u, base %02x%02x%02x%02x, prefix %02x", session.channel,
+	        session.base[0], session.base[1], session.base[2], session.base[3], session.prefix);
 }
 
 K_WORK_DEFINE(session_work, session_work_handler);
@@ -444,7 +516,7 @@ static void channel_scan_work_handler(struct k_work *work)
 		return;
 	}
 
-	if(!session_connected || session_pending)
+	if(atomic_get(&session_connected) == 0 || pending_session_busy())
 	{
 		return;
 	}
@@ -455,14 +527,10 @@ static void channel_scan_work_handler(struct k_work *work)
 		int err;
 
 		/* OFW abandons the private address after 0x4000 RTC ticks. */
-		atomic_clear(&session_connected_public);
+		atomic_clear(&session_connected);
 		atomic_inc(&session_generation);
-		session_connected = false;
-		session_pending = false;
+		pending_session_clear();
 		(void)k_work_cancel(&channel_map_work);
-		pending_channel = ESB_DISCOVERY_CHANNEL;
-		memset(pending_base, 0, sizeof(pending_base));
-		pending_prefix = 0;
 		reset_channel_map(ESB_DISCOVERY_CHANNEL);
 		clear_session_reports();
 		configure_address(discovery_base, discovery_prefix);
@@ -502,7 +570,7 @@ static void channel_scan_work_handler(struct k_work *work)
 	next_delay_ms = ESB_CHANNEL_SCAN_INTERVAL_MS;
 
 out:
-	if(esb_started && session_connected && !session_pending)
+	if(esb_started && atomic_get(&session_connected) != 0 && !pending_session_busy())
 	{
 		k_work_reschedule(k_work_delayable_from_work(work), K_MSEC(next_delay_ms));
 	}
@@ -526,13 +594,9 @@ static void bond_change_work_handler(struct k_work *work)
 	k_work_cancel_delayable(&channel_scan_work);
 	k_work_cancel_delayable(&feature_response_fallback_work);
 
-	session_connected = false;
-	atomic_clear(&session_connected_public);
+	atomic_clear(&session_connected);
 	atomic_inc(&session_generation);
-	session_pending = false;
-	pending_channel = ESB_DISCOVERY_CHANNEL;
-	memset(pending_base, 0, sizeof(pending_base));
-	pending_prefix = 0;
+	pending_session_clear();
 	reset_channel_map(ESB_DISCOVERY_CHANNEL);
 	atomic_set(&last_host_rx_ms, (atomic_val_t)k_uptime_get_32());
 	report_sequence = 0;
@@ -559,24 +623,24 @@ static void bond_change_work_handler(struct k_work *work)
 	}
 }
 
-static void handle_host_frame(const struct valve_esb_payload *payload)
+static bool handle_host_frame(const struct valve_esb_payload *payload)
 {
 	uint8_t expected_bond[8];
 	k_spinlock_key_t key;
 	bool bond_valid;
 
-	if(payload->length < 18)
+	if(payload->length != 18)
 	{
 		if(rejected_host_frame_logs_remaining != 0)
 		{
-			LOG_INF("short ESB E1 frame length %u", payload->length);
+			LOG_INF("invalid ESB E1 frame length %u", payload->length);
 			rejected_host_frame_logs_remaining--;
 		}
-		return;
+		return false;
 	}
 	if(atomic_get(&bond_change_pending) != 0)
 	{
-		return;
+		return false;
 	}
 
 	key = k_spin_lock(&pairing_bond_lock);
@@ -592,15 +656,25 @@ static void handle_host_frame(const struct valve_esb_payload *payload)
 			        sys_get_le32(&expected_bond[0]), sys_get_le32(&expected_bond[4]));
 			rejected_host_frame_logs_remaining--;
 		}
-		return;
+		return false;
+	}
+	if(payload->data[9] > ESB_RF_CHANNEL_MAX)
+	{
+		if(rejected_host_frame_logs_remaining != 0)
+		{
+			LOG_INF("ignoring ESB E1 with invalid channel %u", payload->data[9]);
+			rejected_host_frame_logs_remaining--;
+		}
+		return false;
 	}
 
+	if(!pending_session_queue(payload))
+	{
+		return false;
+	}
 	host_frames_received++;
-	pending_channel = payload->data[9];
-	memcpy(pending_base, &payload->data[13], sizeof(pending_base));
-	pending_prefix = payload->data[17];
-	session_pending = true;
 	k_work_submit(&session_work);
+	return true;
 }
 
 static void stage_feature_response(const uint8_t *response, size_t response_len)
@@ -738,13 +812,8 @@ static void stage_write_result(int32_t result)
 	k_spin_unlock(&latest_input_lock, key);
 }
 
-static bool feature_request_expects_response(const uint8_t *request, size_t request_len)
+static bool feature_request_expects_response(const uint8_t *request)
 {
-	if(request_len == 0)
-	{
-		return false;
-	}
-
 	switch(request[0])
 	{
 		case VALVE_FEATURE_GET_DIGITAL_MAPPINGS:
@@ -763,7 +832,7 @@ static bool feature_request_expects_response(const uint8_t *request, size_t requ
 	}
 }
 
-static void handle_host_poll(const struct valve_esb_payload *payload)
+static bool handle_host_poll(const struct valve_esb_payload *payload)
 {
 	static uint8_t diagnostic_logs_remaining = 20;
 	size_t index = 1;
@@ -771,7 +840,34 @@ static void handle_host_poll(const struct valve_esb_payload *payload)
 	size_t deferred_feature_response_len = 0;
 	bool deferred_feature_response_valid = false;
 
-	polls_received++;
+	/* Keep the management dispatcher safe even if a future caller bypasses the RX check. */
+	if(atomic_get(&session_connected) == 0 || atomic_get(&bond_change_pending) != 0)
+	{
+		return false;
+	}
+	while(index < payload->length)
+	{
+		uint8_t body_len;
+		uint8_t subtype;
+
+		if(index + 1 >= payload->length)
+		{
+			return false;
+		}
+		body_len = payload->data[index];
+		subtype = payload->data[index + 1];
+		if(index + body_len + 2 > payload->length ||
+		   (subtype != ESB_APP_REPORT_WRITE &&
+		    subtype != ESB_APP_REPORT_READ &&
+		    subtype != ESB_APP_HAPTICS) ||
+		   (subtype == ESB_APP_REPORT_WRITE && body_len == 0U))
+		{
+			return false;
+		}
+		index += body_len + 2;
+	}
+	index = 1;
+
 	if(diagnostic_logs_remaining != 0 && !(payload->length == 5 &&
 	                                       payload->data[1] == 2 &&
 	                                       payload->data[2] == ESB_APP_REPORT_WRITE &&
@@ -781,17 +877,11 @@ static void handle_host_poll(const struct valve_esb_payload *payload)
 		diagnostic_logs_remaining--;
 	}
 
-	while(index + 1 < payload->length)
+	while(index < payload->length)
 	{
 		const uint8_t body_len = payload->data[index];
 		const uint8_t subtype = payload->data[index + 1];
 		const uint8_t *body = &payload->data[index + 2];
-
-		if(index + body_len + 2 > payload->length)
-		{
-			LOG_DBG("truncated E3 APP_MSG subtype %u", subtype);
-			break;
-		}
 
 		switch(subtype)
 		{
@@ -812,7 +902,7 @@ static void handle_host_poll(const struct valve_esb_payload *payload)
 				{
 					remember_feature_response(esb_feature_response, n);
 					/* For PROTEUS_FW_6A18D053 and below */
-					if(feature_request_expects_response(body, body_len))
+					if(feature_request_expects_response(body))
 					{
 						schedule_legacy_feature_response_fallback();
 					}
@@ -847,12 +937,12 @@ static void handle_host_poll(const struct valve_esb_payload *payload)
 			}
 			case ESB_APP_HAPTICS:
 			{
-				(void)haptics_handle_output_report(0, body, body_len);
+				if(haptics_handle_output_report(0, body, body_len) != 0)
+				{
+					return false;
+				}
 				break;
 			}
-			default:
-				LOG_DBG("unknown E3 APP_MSG subtype %u", subtype);
-				break;
 		}
 		index += body_len + 2;
 	}
@@ -861,9 +951,11 @@ static void handle_host_poll(const struct valve_esb_payload *payload)
 	{
 		stage_feature_response(deferred_feature_response, deferred_feature_response_len);
 	}
+	polls_received++;
+	return true;
 }
 
-static void handle_host_channel_map(const struct valve_esb_payload *payload)
+static bool handle_host_channel_map(const struct valve_esb_payload *payload)
 {
 	uint8_t received_map[ESB_CHANNEL_MAP_SIZE];
 	k_spinlock_key_t key;
@@ -872,17 +964,23 @@ static void handle_host_channel_map(const struct valve_esb_payload *payload)
 	size_t count;
 
 	if(payload->length < 2 ||
-	   atomic_get(&session_connected_public) == 0 ||
+	   payload->length > ESB_CHANNEL_MAP_SIZE + 1 ||
+	   atomic_get(&session_connected) == 0 ||
 	   atomic_get(&bond_change_pending) != 0)
 	{
-		return;
+		return false;
 	}
 
 	generation = (uint32_t)atomic_get(&session_generation);
-	count = MIN(payload->length - 1, ARRAY_SIZE(channel_map));
+	count = payload->length - 1;
 	for(size_t i = 0; i < count; ++i)
 	{
 		received_map[i] = payload->data[i + 1];
+		if(received_map[i] > ESB_RF_CHANNEL_MAX && received_map[i] != ESB_CHANNEL_UNUSED)
+		{
+			LOG_WRN("ignoring ESB channel map with invalid channel %u", received_map[i]);
+			return false;
+		}
 	}
 	for(size_t i = count; i < ARRAY_SIZE(channel_map); ++i)
 	{
@@ -890,12 +988,12 @@ static void handle_host_channel_map(const struct valve_esb_payload *payload)
 	}
 
 	key = k_spin_lock(&channel_map_lock);
-	if(atomic_get(&session_connected_public) == 0 ||
+	if(atomic_get(&session_connected) == 0 ||
 	   atomic_get(&bond_change_pending) != 0 ||
 	   generation != (uint32_t)atomic_get(&session_generation))
 	{
 		k_spin_unlock(&channel_map_lock, key);
-		return;
+		return false;
 	}
 	memcpy(channel_map, received_map, sizeof(channel_map));
 	channel_maps_received++;
@@ -914,19 +1012,30 @@ static void handle_host_channel_map(const struct valve_esb_payload *payload)
 
 	LOG_DBG("ESB channel map: %u %u %u %u", received_map[0], received_map[1], received_map[2],
 	        received_map[3]);
+	return true;
 }
 
-static void handle_host_awake(const struct valve_esb_payload *payload)
+static bool handle_host_awake(const struct valve_esb_payload *payload)
 {
 	struct valve_esb_payload status = {
 		.length = 2,
 		.pipe = 0,
 	};
 
+	if(atomic_get(&session_connected) == 0 || atomic_get(&bond_change_pending) != 0)
+	{
+		return false;
+	}
+	if(payload->length != 3)
+	{
+		return false;
+	}
+
 	status.data[0] = ESB_CONTROLLER_STATUS;
-	status.data[1] = payload->length >= 3 && payload->data[2] != 0 ? 1 : 0;
+	status.data[1] = payload->data[2] != 0 ? 1 : 0;
 	awake_frames_received++;
 	queue_payload(&status);
+	return true;
 }
 
 static void event_handler(const struct valve_esb_backend_event *event)
@@ -939,6 +1048,9 @@ static void event_handler(const struct valve_esb_backend_event *event)
 		case VALVE_ESB_EVENT_RX_RECEIVED:
 			while(valve_esb_backend_read_rx_payload(&rx_payload) == 0)
 			{
+				bool accepted = false;
+				uint8_t frame_type;
+
 				if(rx_payload.length == 0)
 				{
 					continue;
@@ -948,22 +1060,34 @@ static void event_handler(const struct valve_esb_backend_event *event)
 				{
 					continue;
 				}
-				atomic_set(&last_host_rx_ms, (atomic_val_t)k_uptime_get_32());
-				switch(rx_payload.data[0])
+				frame_type = rx_payload.data[0];
+				/* The discovery address is only an authentication rendezvous. E1 carries
+				 * the replayable OFW-compatible bearer credential for the session. */
+				if(atomic_get(&session_connected) == 0 && frame_type != ESB_HOST_FRAME)
+				{
+					if(rejected_host_frame_logs_remaining != 0)
+					{
+						LOG_INF("ignoring unauthenticated ESB opcode 0x%02x", frame_type);
+						rejected_host_frame_logs_remaining--;
+					}
+					continue;
+				}
+				switch(frame_type)
 				{
 					case ESB_HOST_FRAME:
-						handle_host_frame(&rx_payload);
+						accepted = handle_host_frame(&rx_payload);
 						break;
 					case ESB_HOST_IDLE:
+						accepted = rx_payload.length == 1;
 						break;
 					case ESB_HOST_POLL:
-						handle_host_poll(&rx_payload);
+						accepted = handle_host_poll(&rx_payload);
 						break;
 					case ESB_HOST_CHANNEL_MAP:
-						handle_host_channel_map(&rx_payload);
+						accepted = handle_host_channel_map(&rx_payload);
 						break;
 					case ESB_HOST_AWAKE:
-						handle_host_awake(&rx_payload);
+						accepted = handle_host_awake(&rx_payload);
 						break;
 					default:
 						if(unknown_host_opcode_logs_remaining != 0)
@@ -973,6 +1097,10 @@ static void event_handler(const struct valve_esb_backend_event *event)
 							unknown_host_opcode_logs_remaining--;
 						}
 						break;
+				}
+				if(accepted)
+				{
+					atomic_set(&last_host_rx_ms, (atomic_val_t)k_uptime_get_32());
 				}
 			}
 			break;
@@ -1026,7 +1154,7 @@ void transport_esb_deactivate(void)
 	}
 
 	esb_started = false;
-	atomic_clear(&session_connected_public);
+	atomic_clear(&session_connected);
 	atomic_inc(&session_generation);
 
 	/* Cancel pending and in-flight work before touching the backend. */
@@ -1050,8 +1178,7 @@ void transport_esb_deactivate(void)
 
 	stop_and_flush();
 	valve_esb_backend_disable();
-	session_connected = false;
-	session_pending = false;
+	pending_session_clear();
 	clear_session_reports();
 	atomic_clear(&bond_change_pending);
 }
@@ -1082,13 +1209,13 @@ int transport_esb_send(const struct controller_report *report)
 	k_spinlock_key_t key;
 	uint8_t sequence;
 
-	if(atomic_get(&session_connected_public) == 0 || atomic_get(&bond_change_pending) != 0)
+	if(atomic_get(&session_connected) == 0 || atomic_get(&bond_change_pending) != 0)
 	{
 		return -ENOTCONN;
 	}
 
 	key = k_spin_lock(&latest_input_lock);
-	if(atomic_get(&session_connected_public) == 0 || atomic_get(&bond_change_pending) != 0)
+	if(atomic_get(&session_connected) == 0 || atomic_get(&bond_change_pending) != 0)
 	{
 		k_spin_unlock(&latest_input_lock, key);
 		return -ENOTCONN;
@@ -1111,7 +1238,7 @@ static int queue_input_report(uint8_t report_id, const uint8_t *data, size_t len
 	k_spinlock_key_t key;
 	uint8_t tail;
 
-	if(atomic_get(&session_connected_public) == 0 || atomic_get(&bond_change_pending) != 0)
+	if(atomic_get(&session_connected) == 0 || atomic_get(&bond_change_pending) != 0)
 	{
 		return -ENOTCONN;
 	}
@@ -1123,7 +1250,7 @@ static int queue_input_report(uint8_t report_id, const uint8_t *data, size_t len
 	key = k_spin_lock(&latest_input_lock);
 	/* Teardown clears the public flag before draining under this lock. Recheck
 	 * here so a producer cannot append a stale report after that drain. */
-	if(atomic_get(&session_connected_public) == 0 || atomic_get(&bond_change_pending) != 0)
+	if(atomic_get(&session_connected) == 0 || atomic_get(&bond_change_pending) != 0)
 	{
 		k_spin_unlock(&latest_input_lock, key);
 		return -ENOTCONN;
@@ -1192,7 +1319,7 @@ int transport_esb_send_input_report(uint8_t report_id, const uint8_t *data, size
 
 bool transport_esb_connected(void)
 {
-	return atomic_get(&session_connected_public) != 0;
+	return atomic_get(&session_connected) != 0;
 }
 
 uint8_t transport_esb_channel(void)

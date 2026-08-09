@@ -17,6 +17,7 @@
 #define ESB_EVENT_THREAD_STACK_SIZE 2048
 #define ESB_EVENT_THREAD_PRIORITY 10
 #define NRF_RADIO_BASE_FREQUENCY_MHZ 2400
+#define NRF_RADIO_MAX_CHANNEL 100
 #define RADIO_DISABLED_TIMEOUT_US 3000
 
 static valve_esb_backend_event_handler backend_event_handler;
@@ -414,6 +415,11 @@ int valve_esb_backend_set_address_length(uint8_t length)
 
 int valve_esb_backend_set_rf_channel(uint8_t channel)
 {
+	if(channel > NRF_RADIO_MAX_CHANNEL)
+	{
+		return -EINVAL;
+	}
+
 	current_channel = channel;
 	if(initialized)
 	{
