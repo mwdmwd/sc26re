@@ -8,6 +8,7 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/util.h>
 #if CONFIG_POWEROFF
 #include <zephyr/sys/poweroff.h>
@@ -22,9 +23,12 @@
 #define VALVE_ISP_MAGIC_BASE 0x2001fff0u
 #define POWER_OFF_RELEASE_POLL_MS 20
 #define POWER_OFF_RELEASE_DEBOUNCE_MS 100
+#define POWER_OFF_THREAD_STACK_SIZE 1024
+#define POWER_OFF_THREAD_PRIORITY K_PRIO_COOP(9)
 #define NRF_GPIO_PORT_COUNT 2
 #define NRF_GPIO_PINS_PER_PORT 32
 #define STEAM_BUTTON_NODE DT_ALIAS(button_steam)
+#define STEAM_BUTTON_MASK BIT(CONTROLLER_BUTTON_STEAM)
 
 #if DT_NODE_HAS_STATUS(STEAM_BUTTON_NODE, okay)
 #define STEAM_WAKE_PIN \
@@ -42,6 +46,9 @@ LOG_MODULE_REGISTER(power);
 static uint32_t boot_reset_reason;
 static uint32_t boot_gpio_latches[2];
 static bool boot_state_captured;
+static atomic_t power_off_claimed;
+static uint32_t power_off_release_mask;
+K_SEM_DEFINE(power_off_sem, 0, 1);
 
 static void power_arm_systemoff_wake(void)
 {
@@ -80,6 +87,16 @@ static void power_prepare_shutdown(void)
 	{
 		transport_esb_deactivate();
 	}
+}
+
+static void power_enter_system_off(void)
+{
+#if CONFIG_POWEROFF
+	power_arm_systemoff_wake();
+	sys_poweroff();
+#else
+	sys_reboot(SYS_REBOOT_COLD);
+#endif
 }
 
 void power_capture_boot_state(void)
@@ -122,17 +139,20 @@ int power_reboot_normal(void)
 
 void power_off(void)
 {
-	power_prepare_shutdown();
-#if CONFIG_POWEROFF
-	power_arm_systemoff_wake();
-	sys_poweroff();
-#else
-	sys_reboot(SYS_REBOOT_COLD);
-#endif
+	power_off_after_buttons_released(STEAM_BUTTON_MASK);
 }
 
-void power_off_after_buttons_released(uint32_t release_mask)
+static void power_off_thread_entry(void *unused1, void *unused2, void *unused3)
 {
+	uint32_t release_mask;
+
+	ARG_UNUSED(unused1);
+	ARG_UNUSED(unused2);
+	ARG_UNUSED(unused3);
+
+	k_sem_take(&power_off_sem, K_FOREVER);
+	release_mask = power_off_release_mask;
+
 	power_prepare_shutdown();
 
 	if(release_mask != 0U)
@@ -146,13 +166,22 @@ void power_off_after_buttons_released(uint32_t release_mask)
 		}
 		k_msleep(POWER_OFF_RELEASE_DEBOUNCE_MS);
 	}
+	power_enter_system_off();
+}
 
-#if CONFIG_POWEROFF
-	power_arm_systemoff_wake();
-	sys_poweroff();
-#else
-	sys_reboot(SYS_REBOOT_COLD);
-#endif
+K_THREAD_DEFINE(power_off_thread, POWER_OFF_THREAD_STACK_SIZE, power_off_thread_entry, NULL, NULL,
+                NULL, POWER_OFF_THREAD_PRIORITY, 0, 0);
+
+void power_off_after_buttons_released(uint32_t release_mask)
+{
+	if(!atomic_cas(&power_off_claimed, 0, 1))
+	{
+		LOG_DBG("power-off already in progress");
+		return;
+	}
+
+	power_off_release_mask = release_mask;
+	k_sem_give(&power_off_sem);
 }
 
 int power_reboot_to_valve_isp(void)
