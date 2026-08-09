@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
@@ -24,6 +25,12 @@
 #define PERSONALITY_PERSIST_DELAY_MS 60000
 #define STEAM_POWER_HOLD_MS 5000
 #define INPUT_REFRESH_MS 15
+#define INACTIVITY_STICK_THRESHOLD 4000
+#define INACTIVITY_PHYSICAL_BUTTONS BIT_MASK(20)
+#define INACTIVITY_TOUCH_BUTTONS \
+	(BIT(CONTROLLER_BUTTON_RIGHT_STICK_TOUCH) | \
+	 BIT(CONTROLLER_BUTTON_RIGHT_TOUCHPAD_TOUCH) | \
+	 BIT(CONTROLLER_BUTTON_LEFT_STICK_TOUCH) | BIT(CONTROLLER_BUTTON_LEFT_TOUCHPAD_TOUCH))
 
 LOG_MODULE_REGISTER(app);
 
@@ -33,6 +40,21 @@ static bool chord_pressed(uint32_t buttons, enum controller_button first,
 	uint32_t mask = BIT(first) | BIT(second);
 
 	return (buttons & mask) == mask;
+}
+
+static bool report_has_activity(const struct controller_report *report)
+{
+	if((report->buttons & (INACTIVITY_PHYSICAL_BUTTONS | INACTIVITY_TOUCH_BUTTONS)) != 0U ||
+	   report->trigger_left != 0 ||
+	   report->trigger_right != 0)
+	{
+		return true;
+	}
+
+	return abs(report->stick_left_x) > INACTIVITY_STICK_THRESHOLD ||
+	       abs(report->stick_left_y) > INACTIVITY_STICK_THRESHOLD ||
+	       abs(report->stick_right_x) > INACTIVITY_STICK_THRESHOLD ||
+	       abs(report->stick_right_y) > INACTIVITY_STICK_THRESHOLD;
 }
 
 static enum radio_personality boot_chord_personality(void)
@@ -78,6 +100,8 @@ int main(void)
 	struct controller_report previous = { 0 };
 	int64_t steam_button_since = 0;
 	int64_t last_input_sent = 0;
+	int64_t last_activity_ms;
+	int16_t inactivity_timeout_seconds = 0;
 	enum charge_mode_result charge_result = CHARGE_MODE_SKIPPED;
 	bool usb_vbus_charge_radio;
 	bool first = true;
@@ -172,12 +196,34 @@ int main(void)
 	}
 
 	LOG_INF("SC26re started in %s mode", radio_personality_name());
+	(void)ibex_setting_get(SETTING_SLEEP_INACTIVITY_TIMEOUT, &inactivity_timeout_seconds);
+	last_activity_ms = k_uptime_get();
 
 	for(;;)
 	{
 		struct controller_report current;
+		int16_t timeout_seconds = inactivity_timeout_seconds;
+		int64_t now_ms;
 
 		hardware_read_report(&current);
+		now_ms = k_uptime_get();
+		if(ibex_setting_get(SETTING_SLEEP_INACTIVITY_TIMEOUT, &timeout_seconds) &&
+		   timeout_seconds != inactivity_timeout_seconds)
+		{
+			inactivity_timeout_seconds = timeout_seconds;
+			last_activity_ms = now_ms;
+		}
+		if(report_has_activity(&current) || transport_usb_attached() || puck_interface_active())
+		{
+			last_activity_ms = now_ms;
+		}
+		else if(inactivity_timeout_seconds > 0 &&
+		        now_ms - last_activity_ms >= (int64_t)inactivity_timeout_seconds * MSEC_PER_SEC)
+		{
+			LOG_INF("input inactive for %d seconds: shutting down", inactivity_timeout_seconds);
+			last_activity_ms = now_ms;
+			power_off();
+		}
 		if((current.buttons & BIT(CONTROLLER_BUTTON_STEAM)) != 0U)
 		{
 			if(steam_button_since == 0)
