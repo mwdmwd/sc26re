@@ -169,47 +169,39 @@ static ssize_t write_report(struct bt_conn *conn, const struct bt_gatt_attr *att
                             uint16_t len, uint16_t offset, uint8_t flags)
 {
 	struct valve_report *report = attr->user_data;
+	bool feature = report->type == HIDS_FEATURE;
 
 	ARG_UNUSED(conn);
 
-	if(report->type == HIDS_FEATURE && offset == 0 && flags == 0)
+	if(flags & (BT_GATT_WRITE_FLAG_PREPARE | BT_GATT_WRITE_FLAG_EXECUTE))
+	{
+		return BT_GATT_ERR(BT_ATT_ERR_NOT_SUPPORTED);
+	}
+	if(offset != 0U)
+	{
+		LOG_WRN("reject: rpt=0x%02x offset=%u", report->id, offset);
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+	}
+	if((feature && (len == 0U || len > report->size)) || (!feature && len != report->size))
+	{
+		LOG_WRN("reject: rpt=0x%02x len=%u expected%s=%u", report->id, len, feature ? "<" : "",
+		        report->size);
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+	}
+
+	if(feature)
 	{
 		const uint8_t *request = buf;
 
 		LOG_DBG("direct feature request: opcode 0x%02x, length %u", request[0], len);
 		LOG_HEXDUMP_DBG(request, MIN(len, 40), "feature request");
-	}
-
-	if(offset + len > report->size)
-	{
-		LOG_WRN("reject: rpt=0x%02x off=%u+len=%u > size=%u", report->id, offset, len,
-		        report->size);
-		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
-	}
-
-	if(flags & BT_GATT_WRITE_FLAG_PREPARE)
-	{
-		return 0;
-	}
-
-	if(flags & BT_GATT_WRITE_FLAG_EXECUTE)
-	{
-		LOG_DBG("executing long write: report 0x%02x, offset %u, length %u", report->id, offset,
-		        len);
-	}
-
-	if(report->type == HIDS_FEATURE && offset == 0)
-	{
 		valve_feature_respond(VALVE_FEATURE_LINK_BLE, buf, len, feature_01.data,
 		                      sizeof(feature_01.data));
 		return len;
 	}
 
-	memcpy(report->data + offset, buf, len);
-	if(report->type == HIDS_OUTPUT && offset + len == report->size)
-	{
-		handle_output_report(report);
-	}
+	memcpy(report->data, buf, len);
+	handle_output_report(report);
 	return len;
 }
 
@@ -217,11 +209,18 @@ static ssize_t write_byte(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                           uint16_t len, uint16_t offset, uint8_t flags)
 {
 	ARG_UNUSED(conn);
-	ARG_UNUSED(flags);
 
-	if(offset != 0 || len != 1)
+	if(flags & (BT_GATT_WRITE_FLAG_PREPARE | BT_GATT_WRITE_FLAG_EXECUTE))
+	{
+		return BT_GATT_ERR(BT_ATT_ERR_NOT_SUPPORTED);
+	}
+	if(offset != 0)
 	{
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+	}
+	if(len != 1)
+	{
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 	}
 	*(uint8_t *)attr->user_data = *(const uint8_t *)buf;
 	return len;
@@ -274,8 +273,7 @@ static void input_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE | \
 				   BT_GATT_CHRC_WRITE_WITHOUT_RESP, \
 			       BT_GATT_PERM_READ_ENCRYPT | \
-				   BT_GATT_PERM_WRITE_ENCRYPT | \
-				   BT_GATT_PERM_PREPARE_WRITE, \
+				   BT_GATT_PERM_WRITE_ENCRYPT, \
 			       read_report, write_report, &report), \
 	BT_GATT_DESCRIPTOR(BT_UUID_HIDS_REPORT_REF, BT_GATT_PERM_READ, \
 			   read_report_ref, NULL, &report)
