@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
+#include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -15,14 +16,18 @@
 #endif
 #include <zephyr/sys/reboot.h>
 
+#include "analog.h"
+#include "battery.h"
 #include "controller.h"
 #include "power.h"
+#include "puck_interface.h"
 #include "rgbw_led.h"
 #include "watchdog.h"
 
 #define VALVE_ISP_MAGIC_BASE 0x2001fff0u
 #define POWER_OFF_RELEASE_POLL_MS 20
 #define POWER_OFF_RELEASE_DEBOUNCE_MS 100
+#define POWER_OFF_EXTERNAL_POLL_MS 100
 #define POWER_OFF_THREAD_STACK_SIZE 1024
 #define POWER_OFF_THREAD_PRIORITY K_PRIO_COOP(9)
 #define NRF_GPIO_PORT_COUNT 2
@@ -92,7 +97,54 @@ static void power_prepare_shutdown(void)
 static void power_enter_system_off(void)
 {
 #if CONFIG_POWEROFF
+	int err;
+	bool waiting_for_external_power = false;
+
 	power_arm_systemoff_wake();
+	if(IS_ENABLED(CONFIG_IBEX_BATTERY))
+	{
+		for(;;)
+		{
+			bool external_source;
+			bool puck_pilot_present = false;
+
+			/* The original release check is stale after waiting on a charger. */
+			if(waiting_for_external_power && (hardware_read_buttons() & STEAM_BUTTON_MASK) != 0U)
+			{
+				LOG_INF("Steam pressed while externally powered: restarting");
+				sys_reboot(SYS_REBOOT_COLD);
+			}
+
+			external_source = transport_usb_attached() || puck_interface_active();
+			if(!external_source)
+			{
+				err = analog_puck_pilot_present(&puck_pilot_present);
+				if(err)
+				{
+					LOG_WRN("puck pilot read failed: %d; skipping MP2733 shipping mode", err);
+					err = 0;
+					break;
+				}
+				external_source = puck_pilot_present;
+			}
+			err = external_source ? -EAGAIN : battery_prepare_poweroff();
+			if(err != -EAGAIN)
+			{
+				break;
+			}
+			if(!waiting_for_external_power)
+			{
+				LOG_INF("external power present; waiting to enter MP2733 shipping mode");
+				waiting_for_external_power = true;
+			}
+			k_msleep(POWER_OFF_EXTERNAL_POLL_MS);
+			watchdog_feed();
+		}
+		if(err < 0)
+		{
+			LOG_WRN("MP2733 shipping mode failed: %d; falling back to MCU SYSTEMOFF", err);
+		}
+	}
 	sys_poweroff();
 #else
 	sys_reboot(SYS_REBOOT_COLD);
@@ -166,6 +218,7 @@ static void power_off_thread_entry(void *unused1, void *unused2, void *unused3)
 		}
 		k_msleep(POWER_OFF_RELEASE_DEBOUNCE_MS);
 	}
+
 	power_enter_system_off();
 }
 

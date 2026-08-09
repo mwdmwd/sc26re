@@ -20,16 +20,20 @@ LOG_MODULE_REGISTER(battery);
 
 #define MP2733_REG_INPUT_CURRENT_LIMIT 0x00
 #define MP2733_REG_INPUT_VOLTAGE_LIMIT 0x01
+#define MP2733_REG_THERMAL_CONFIGURATION 0x02
 #define MP2733_REG_ADC_OTG_CONFIGURATION 0x03
 #define MP2733_REG_CHARGE_CONTROL 0x04
 #define MP2733_REG_CHARGE_VOLTAGE 0x07
 #define MP2733_REG_TIMER_CONFIGURATION 0x08
+#define MP2733_REG_BATFET_CONFIGURATION 0x0a
 #define MP2733_REG_STATUS_BASE 0x0c
 #define MP2733_REG_INPUT_LIMIT_STATUS 0x14
 #define MP2733_REG_DPM_MASK 0x15
 #define MP2733_INITIAL_CONFIG_REGISTER_COUNT 11
 #define MP2733_STATUS_REGISTER_COUNT 12
 #define MP2733_REG_RESET BIT(7)
+#define MP2733_TSM_DELAY BIT(7)
+#define MP2733_BATFET_DISABLE BIT(5)
 #define MP2733_ADC_START BIT(7)
 #define MP2733_ADC_RATE BIT(6)
 #define MP2733_ADC_CONTROL_MASK (MP2733_ADC_START | MP2733_ADC_RATE)
@@ -58,7 +62,6 @@ enum mp2733_chg_stat
 };
 #define MP2733_CHG_STAT_SHIFT 3
 #define MP2733_CHG_STAT_MASK 0x03
-
 #define BATTERY_POLL_PERIOD_MS 2000
 #define BATTERY_LOG_PERIOD_MS 30000
 #define BATTERY_INITIAL_POLL_DELAY_MS 500
@@ -180,6 +183,7 @@ static struct mp2733_fg_policy fg_policy;
 static uint16_t battery_meter_samples_mv[BATTERY_METER_WINDOW_SIZE];
 static uint16_t battery_meter_batch_mv[BATTERY_METER_WINDOW_SIZE];
 static uint32_t battery_meter_sample_count;
+static bool battery_powering_off;
 K_MUTEX_DEFINE(battery_poll_lock);
 K_MUTEX_DEFINE(battery_cache_lock);
 static K_THREAD_STACK_DEFINE(battery_stack, 1536);
@@ -825,6 +829,11 @@ static int battery_read_fresh_status(struct controller_battery_report *report)
 	}
 
 	k_mutex_lock(&battery_poll_lock, K_FOREVER);
+	if(battery_powering_off)
+	{
+		k_mutex_unlock(&battery_poll_lock);
+		return -ESHUTDOWN;
+	}
 	err = battery_poll_once(report);
 	if(!err)
 	{
@@ -918,6 +927,85 @@ int battery_init(void)
 	return 0;
 }
 
+int battery_prepare_poweroff(void)
+{
+	uint8_t status;
+	uint8_t thermal_config;
+	uint8_t batfet_config;
+	uint8_t writes[3][2];
+	struct i2c_msg messages[3];
+	int err;
+
+	if(!i2c_is_ready_dt(&mp2733))
+	{
+		return -ENODEV;
+	}
+
+	k_mutex_lock(&battery_poll_lock, K_FOREVER);
+	err = i2c_reg_read_byte_dt(&mp2733, MP2733_REG_STATUS_BASE, &status);
+	if(err)
+	{
+		goto out;
+	}
+	if(((status >> MP2733_VIN_STAT_SHIFT) & MP2733_VIN_STAT_MASK) != 0U)
+	{
+		err = -EAGAIN;
+		goto out;
+	}
+
+	err = i2c_reg_read_byte_dt(&mp2733, MP2733_REG_THERMAL_CONFIGURATION, &thermal_config);
+	if(err)
+	{
+		goto out;
+	}
+	err = i2c_reg_read_byte_dt(&mp2733, MP2733_REG_BATFET_CONFIGURATION, &batfet_config);
+	if(err)
+	{
+		goto out;
+	}
+
+	/*
+	 * OFW clears tSM_DLY, asserts BATTFET_DIS, then restores REG02 in one
+	 * chained transfer. The middle write disconnects the battery from VSYS;
+	 * keeping the sequence atomic prevents an unrelated charger access from
+	 * being interleaved while the system rail is disappearing.
+	 */
+	writes[0][0] = MP2733_REG_THERMAL_CONFIGURATION;
+	writes[0][1] = thermal_config & ~MP2733_TSM_DELAY;
+	writes[1][0] = MP2733_REG_BATFET_CONFIGURATION;
+	writes[1][1] = batfet_config | MP2733_BATFET_DISABLE;
+	writes[2][0] = MP2733_REG_THERMAL_CONFIGURATION;
+	writes[2][1] = thermal_config;
+
+	messages[0] = (struct i2c_msg){
+		.buf = writes[0],
+		.len = sizeof(writes[0]),
+		.flags = I2C_MSG_WRITE,
+	};
+	messages[1] = (struct i2c_msg){
+		.buf = writes[1],
+		.len = sizeof(writes[1]),
+		.flags = I2C_MSG_WRITE | I2C_MSG_RESTART,
+	};
+	messages[2] = (struct i2c_msg){
+		.buf = writes[2],
+		.len = sizeof(writes[2]),
+		.flags = I2C_MSG_WRITE | I2C_MSG_RESTART | I2C_MSG_STOP,
+	};
+
+	/* No charger worker may touch the PMIC after the shipping transaction. */
+	battery_powering_off = true;
+	err = i2c_transfer_dt(&mp2733, messages, ARRAY_SIZE(messages));
+	if(err)
+	{
+		battery_powering_off = false;
+	}
+
+out:
+	k_mutex_unlock(&battery_poll_lock);
+	return err;
+}
+
 int battery_get_status(struct controller_battery_report *report)
 {
 	int64_t age_ms;
@@ -983,6 +1071,11 @@ const char *battery_fuel_gauge_state_name(uint8_t state)
 #else
 
 int battery_init(void)
+{
+	return -ENODEV;
+}
+
+int battery_prepare_poweroff(void)
 {
 	return -ENODEV;
 }
