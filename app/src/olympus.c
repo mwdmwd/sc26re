@@ -9,6 +9,7 @@
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
@@ -62,8 +63,9 @@ static const struct gpio_dt_spec olympus_irq = GPIO_DT_SPEC_GET(OLYMPUS_NODE, in
 static const struct gpio_dt_spec olympus_reset = GPIO_DT_SPEC_GET(OLYMPUS_NODE, reset_gpios);
 
 static struct gpio_callback olympus_irq_callback;
-static struct k_sem olympus_irq_sem;
-static struct k_mutex olympus_report_mutex;
+K_SEM_DEFINE(olympus_irq_sem, 0, 1);
+K_MUTEX_DEFINE(olympus_report_mutex);
+static atomic_t olympus_ready;
 static struct controller_report olympus_report;
 static bool olympus_report_valid;
 static struct olympus_debug_snapshot olympus_debug;
@@ -993,9 +995,6 @@ int olympus_init(void)
 		return -ENODEV;
 	}
 
-	k_sem_init(&olympus_irq_sem, 0, 1);
-	k_mutex_init(&olympus_report_mutex);
-
 	err = gpio_pin_configure_dt(&olympus_reset, GPIO_OUTPUT_INACTIVE);
 	if(err)
 	{
@@ -1007,9 +1006,17 @@ int olympus_init(void)
 		return err;
 	}
 
-	gpio_pin_set_dt(&olympus_reset, 0);
+	err = gpio_pin_set_dt(&olympus_reset, 0);
+	if(err)
+	{
+		return err;
+	}
 	k_sleep(K_MSEC(2));
-	gpio_pin_set_dt(&olympus_reset, 1);
+	err = gpio_pin_set_dt(&olympus_reset, 1);
+	if(err)
+	{
+		return err;
+	}
 	k_sleep(K_MSEC(12));
 
 	err = olympus_check_descriptor();
@@ -1033,6 +1040,7 @@ int olympus_init(void)
 	err = gpio_pin_interrupt_configure_dt(&olympus_irq, GPIO_INT_EDGE_TO_ACTIVE);
 	if(err)
 	{
+		(void)gpio_remove_callback(olympus_irq.port, &olympus_irq_callback);
 		return err;
 	}
 
@@ -1040,12 +1048,25 @@ int olympus_init(void)
 	                K_THREAD_STACK_SIZEOF(olympus_thread_stack), olympus_thread_entry, NULL, NULL,
 	                NULL, 9, 0, K_NO_WAIT);
 	k_thread_name_set(&olympus_thread, "olympus");
+	atomic_set(&olympus_ready, 1);
 	LOG_INF("Olympus configured at I2C address 0x%02x", olympus_i2c.addr);
 	return 0;
 }
 
 void olympus_read_report(struct controller_report *report)
 {
+	if(atomic_get(&olympus_ready) == 0)
+	{
+		report->touchpad_left_x = 0;
+		report->touchpad_left_y = 0;
+		report->touchpad_left_pressure = 0;
+		report->touchpad_right_x = 0;
+		report->touchpad_right_y = 0;
+		report->touchpad_right_pressure = 0;
+		report->buttons &= ~OLYMPUS_REPORT_BUTTON_MASK;
+		return;
+	}
+
 	k_mutex_lock(&olympus_report_mutex, K_FOREVER);
 	report->touchpad_left_x = olympus_report.touchpad_left_x;
 	report->touchpad_left_y = olympus_report.touchpad_left_y;
@@ -1062,4 +1083,5 @@ void olympus_get_debug_snapshot(struct olympus_debug_snapshot *snapshot)
 	k_mutex_lock(&olympus_report_mutex, K_FOREVER);
 	*snapshot = olympus_debug;
 	k_mutex_unlock(&olympus_report_mutex);
+	snapshot->ready = atomic_get(&olympus_ready) != 0;
 }

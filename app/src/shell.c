@@ -663,7 +663,7 @@ static int cmd_olympus_status(const struct shell *shell, size_t argc, char **arg
 	ARG_UNUSED(argv);
 
 	olympus_get_debug_snapshot(&snapshot);
-	shell_print(shell, "Olympus frames: %u", snapshot.frame_count);
+	shell_print(shell, "Olympus ready=%u frames=%u", snapshot.ready, snapshot.frame_count);
 	print_olympus_pad_debug(shell, "left", &snapshot.left);
 	print_olympus_pad_debug(shell, "right", &snapshot.right);
 	return 0;

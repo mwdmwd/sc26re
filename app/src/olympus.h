@@ -30,6 +30,7 @@ struct olympus_pad_debug
 struct olympus_debug_snapshot
 {
 	uint32_t frame_count;
+	bool ready;
 	struct olympus_pad_debug left;
 	struct olympus_pad_debug right;
 };
