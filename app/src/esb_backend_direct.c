@@ -7,10 +7,13 @@
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include <zephyr/irq.h>
 #include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/util.h>
 
 #include "esb_backend.h"
+
+LOG_MODULE_REGISTER(esb_backend_direct);
 
 #define RX_FIFO_SIZE 8
 #define TX_FIFO_SIZE 2
@@ -53,6 +56,7 @@ static volatile uint32_t rx_dropped_events;
 static atomic_t pending_tx_success_events;
 static atomic_t pending_rx_received_events;
 static bool event_thread_started;
+static struct onoff_manager *hfclk_manager;
 
 static uint8_t bitrev8(uint8_t value)
 {
@@ -82,7 +86,7 @@ static int wait_disabled(void)
 static int clocks_start(void)
 {
 	struct onoff_manager *manager;
-	struct onoff_client client;
+	struct onoff_client client = { 0 };
 	int result;
 	int err;
 
@@ -104,7 +108,14 @@ static int clocks_start(void)
 		err = sys_notify_fetch_result(&client.notify, &result);
 	} while(err == -EAGAIN);
 
-	return err ? err : result;
+	err = err ? err : result;
+	if(err)
+	{
+		return err;
+	}
+
+	hfclk_manager = manager;
+	return 0;
 }
 
 static void emit_event(enum valve_esb_backend_event_id event_id)
@@ -553,19 +564,28 @@ int valve_esb_backend_read_rx_payload(struct valve_esb_payload *payload)
 
 void valve_esb_backend_disable(void)
 {
-	if(!initialized)
+	if(initialized)
 	{
-		return;
+		irq_disable(RADIO_IRQn);
+		nrf_radio_int_disable(NRF_RADIO, NRF_RADIO_INT_END_MASK);
+		rx_running = false;
+		tx_active = false;
+		nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_DISABLE);
+		(void)wait_disabled();
+		initialized = false;
+		backend_event_handler = NULL;
 	}
 
-	irq_disable(RADIO_IRQn);
-	nrf_radio_int_disable(NRF_RADIO, NRF_RADIO_INT_END_MASK);
-	rx_running = false;
-	tx_active = false;
-	nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_DISABLE);
-	(void)wait_disabled();
-	initialized = false;
-	backend_event_handler = NULL;
+	if(hfclk_manager)
+	{
+		int err = onoff_release(hfclk_manager);
+
+		if(err < 0)
+		{
+			LOG_WRN("failed to release HF clock: %d", err);
+		}
+		hfclk_manager = NULL;
+	}
 }
 
 int valve_esb_backend_get_debug(struct valve_esb_backend_debug *debug)

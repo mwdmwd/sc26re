@@ -123,7 +123,7 @@ static atomic_t last_host_rx_ms;
 static atomic_t session_generation;
 static atomic_t session_connected;
 static atomic_t bond_change_pending;
-static bool esb_started;
+static atomic_t esb_started;
 static uint32_t host_frames_received;
 static uint32_t channel_maps_received;
 static uint32_t awake_frames_received;
@@ -254,7 +254,7 @@ static void refresh_pairing_bond(void)
 		LOG_INF("no active ESB bond selected");
 	}
 
-	if(changed && esb_started)
+	if(changed && atomic_get(&esb_started) != 0)
 	{
 		atomic_set(&bond_change_pending, 1);
 		k_work_reschedule(&bond_change_work, K_MSEC(ESB_BOND_CHANGE_DEFER_MS));
@@ -278,33 +278,58 @@ static int queue_payload(const struct valve_esb_payload *payload)
 	return err;
 }
 
-static void stop_and_flush(void)
+static int stop_and_flush(void)
 {
-	(void)valve_esb_backend_stop_rx();
+	int err;
+
+	err = valve_esb_backend_stop_rx();
+	if(err)
+	{
+		return err;
+	}
 	(void)valve_esb_backend_flush_rx();
 	(void)valve_esb_backend_flush_tx();
+	return 0;
 }
 
-static void configure_address(const uint8_t *base, const uint8_t *prefix)
+static int configure_address(uint8_t channel, const uint8_t *base, const uint8_t *prefix)
 {
-	stop_and_flush();
-	(void)valve_esb_backend_set_rf_channel(ESB_DISCOVERY_CHANNEL);
+	int err;
+
+	err = stop_and_flush();
+	if(err)
+	{
+		return err;
+	}
+	err = valve_esb_backend_set_rf_channel(channel);
+	if(err)
+	{
+		return err;
+	}
 	(void)valve_esb_backend_set_base_address_0(base);
 	(void)valve_esb_backend_set_prefixes(prefix, 1);
-	current_channel = ESB_DISCOVERY_CHANNEL;
+	return 0;
 }
 
-static void switch_channel(uint8_t channel)
+static int start_discovery(void)
 {
-	if(channel == current_channel || channel == ESB_CHANNEL_UNUSED)
-	{
-		return;
-	}
+	int err;
 
-	(void)valve_esb_backend_stop_rx();
-	(void)valve_esb_backend_set_rf_channel(channel);
-	current_channel = channel;
-	(void)valve_esb_backend_start_rx();
+	err = configure_address(ESB_DISCOVERY_CHANNEL, discovery_base, discovery_prefix);
+	if(err)
+	{
+		return err;
+	}
+	if(atomic_get(&esb_started) == 0)
+	{
+		return -ESHUTDOWN;
+	}
+	err = valve_esb_backend_start_rx();
+	if(!err)
+	{
+		current_channel = ESB_DISCOVERY_CHANNEL;
+	}
+	return err;
 }
 
 static void reset_channel_map(uint8_t channel)
@@ -322,6 +347,53 @@ static void reset_channel_map(uint8_t channel)
 	k_spin_unlock(&channel_map_lock, key);
 }
 
+static int switch_channel(uint8_t channel)
+{
+	int discovery_err;
+	int err;
+
+	if(channel == current_channel || channel == ESB_CHANNEL_UNUSED)
+	{
+		return 0;
+	}
+
+	err = valve_esb_backend_stop_rx();
+	if(!err)
+	{
+		err = valve_esb_backend_set_rf_channel(channel);
+	}
+	if(!err && atomic_get(&esb_started) == 0)
+	{
+		err = -ESHUTDOWN;
+	}
+	if(!err)
+	{
+		err = valve_esb_backend_start_rx();
+	}
+	if(!err)
+	{
+		current_channel = channel;
+		return 0;
+	}
+
+	atomic_clear(&session_connected);
+	atomic_inc(&session_generation);
+	pending_session_clear();
+	reset_channel_map(ESB_DISCOVERY_CHANNEL);
+	clear_session_reports();
+	discovery_err = start_discovery();
+	if(discovery_err)
+	{
+		LOG_ERR("failed to switch ESB channel to %u (%d) and restore discovery (%d)", channel, err,
+		        discovery_err);
+	}
+	else
+	{
+		LOG_WRN("failed to switch ESB channel to %u: %d, restored discovery", channel, err);
+	}
+	return err;
+}
+
 static void channel_map_work_handler(struct k_work *work)
 {
 	k_spinlock_key_t key;
@@ -335,7 +407,7 @@ static void channel_map_work_handler(struct k_work *work)
 	generation = pending_map_generation;
 	k_spin_unlock(&channel_map_lock, key);
 
-	if(!esb_started ||
+	if(atomic_get(&esb_started) == 0 ||
 	   atomic_get(&session_connected) == 0 ||
 	   atomic_get(&bond_change_pending) != 0 ||
 	   generation != (uint32_t)atomic_get(&session_generation))
@@ -346,7 +418,7 @@ static void channel_map_work_handler(struct k_work *work)
 	/* The original controller gives the puck's E4 reply time to finish. */
 	k_usleep(500);
 
-	if(!esb_started ||
+	if(atomic_get(&esb_started) == 0 ||
 	   atomic_get(&session_connected) == 0 ||
 	   atomic_get(&bond_change_pending) != 0 ||
 	   generation != (uint32_t)atomic_get(&session_generation))
@@ -354,7 +426,7 @@ static void channel_map_work_handler(struct k_work *work)
 		return;
 	}
 
-	switch_channel(channel);
+	(void)switch_channel(channel);
 }
 
 K_WORK_DEFINE(channel_map_work, channel_map_work_handler);
@@ -458,10 +530,12 @@ static void queue_latest_input(void)
 static void session_work_handler(struct k_work *work)
 {
 	struct esb_pending_session session;
+	int discovery_err;
+	int err;
 
 	ARG_UNUSED(work);
 
-	if(!esb_started || atomic_get(&bond_change_pending) != 0)
+	if(atomic_get(&esb_started) == 0 || atomic_get(&bond_change_pending) != 0)
 	{
 		pending_session_clear();
 		return;
@@ -479,16 +553,35 @@ static void session_work_handler(struct k_work *work)
 	(void)k_work_cancel_delayable(&channel_scan_work);
 	clear_session_reports();
 
-	(void)valve_esb_backend_stop_rx();
-	(void)valve_esb_backend_flush_rx();
-	(void)valve_esb_backend_flush_tx();
-	(void)valve_esb_backend_set_rf_channel(session.channel);
-	(void)valve_esb_backend_set_base_address_0(session.base);
-	(void)valve_esb_backend_set_prefixes(&session.prefix, 1);
-	current_channel = session.channel;
+	err = configure_address(session.channel, session.base, &session.prefix);
+	if(!err && atomic_get(&esb_started) == 0)
+	{
+		err = -ESHUTDOWN;
+	}
+	if(!err)
+	{
+		err = valve_esb_backend_start_rx();
+	}
+	if(err)
+	{
+		pending_session_clear();
+		reset_channel_map(ESB_DISCOVERY_CHANNEL);
+		discovery_err = start_discovery();
+		if(discovery_err)
+		{
+			LOG_ERR("failed to configure ESB session (%d) and restore discovery (%d)", err,
+			        discovery_err);
+		}
+		else
+		{
+			LOG_WRN("failed to configure ESB session: %d; restored discovery", err);
+		}
+		return;
+	}
+
 	reset_channel_map(session.channel);
 	atomic_set(&last_host_rx_ms, (atomic_val_t)k_uptime_get_32());
-	(void)valve_esb_backend_start_rx();
+	current_channel = session.channel;
 	atomic_set(&session_connected, 1);
 	pending_session_clear();
 	(void)k_work_reschedule(&channel_scan_work, K_MSEC(ESB_CHANNEL_HOLD_MS));
@@ -511,7 +604,7 @@ static void channel_scan_work_handler(struct k_work *work)
 
 	ARG_UNUSED(work);
 
-	if(!esb_started)
+	if(atomic_get(&esb_started) == 0)
 	{
 		return;
 	}
@@ -533,8 +626,7 @@ static void channel_scan_work_handler(struct k_work *work)
 		(void)k_work_cancel(&channel_map_work);
 		reset_channel_map(ESB_DISCOVERY_CHANNEL);
 		clear_session_reports();
-		configure_address(discovery_base, discovery_prefix);
-		err = valve_esb_backend_start_rx();
+		err = start_discovery();
 		if(err)
 		{
 			LOG_WRN("failed to restart ESB discovery after session timeout: %d", err);
@@ -565,12 +657,17 @@ static void channel_scan_work_handler(struct k_work *work)
 	k_spin_unlock(&channel_map_lock, key);
 	if(channel != ESB_CHANNEL_UNUSED)
 	{
-		switch_channel(channel);
+		if(switch_channel(channel))
+		{
+			return;
+		}
 	}
 	next_delay_ms = ESB_CHANNEL_SCAN_INTERVAL_MS;
 
 out:
-	if(esb_started && atomic_get(&session_connected) != 0 && !pending_session_busy())
+	if(atomic_get(&esb_started) != 0 &&
+	   atomic_get(&session_connected) != 0 &&
+	   !pending_session_busy())
 	{
 		k_work_reschedule(k_work_delayable_from_work(work), K_MSEC(next_delay_ms));
 	}
@@ -582,7 +679,7 @@ static void bond_change_work_handler(struct k_work *work)
 
 	ARG_UNUSED(work);
 
-	if(!esb_started)
+	if(atomic_get(&esb_started) == 0)
 	{
 		atomic_clear(&bond_change_pending);
 		return;
@@ -604,14 +701,13 @@ static void bond_change_work_handler(struct k_work *work)
 
 	clear_session_reports();
 
-	configure_address(discovery_base, discovery_prefix);
-	if(!esb_started)
+	if(atomic_get(&esb_started) == 0)
 	{
 		atomic_clear(&bond_change_pending);
 		return;
 	}
 
-	err = valve_esb_backend_start_rx();
+	err = start_discovery();
 	atomic_clear(&bond_change_pending);
 	if(err)
 	{
@@ -1115,6 +1211,7 @@ int transport_esb_init(void)
 	int err;
 
 	atomic_clear(&bond_change_pending);
+	atomic_clear(&esb_started);
 	err = valve_settings_register_esb_bond_changed_callback(refresh_pairing_bond);
 	if(err)
 	{
@@ -1133,27 +1230,42 @@ int transport_esb_init(void)
 	{
 		return err;
 	}
-	esb_started = true;
-	atomic_inc(&session_generation);
-	if((err = valve_esb_backend_set_address_length(5)) != 0)
+	err = valve_esb_backend_set_address_length(5);
+	if(err)
 	{
-		return err;
+		goto fail;
 	}
 
-	configure_address(discovery_base, discovery_prefix);
-	LOG_INF("ESB listening on discovery address ibex/10, channel 2");
+	err = configure_address(ESB_DISCOVERY_CHANNEL, discovery_base, discovery_prefix);
+	if(err)
+	{
+		goto fail;
+	}
+	atomic_set(&esb_started, 1);
 	err = valve_esb_backend_start_rx();
+	if(err)
+	{
+		goto fail;
+	}
+	current_channel = ESB_DISCOVERY_CHANNEL;
+	atomic_inc(&session_generation);
+	LOG_INF("ESB listening on discovery address ibex/10, channel 2");
+	return 0;
+
+fail:
+	atomic_clear(&esb_started);
+	valve_esb_backend_disable();
+	atomic_clear(&session_connected);
 	return err;
 }
 
 void transport_esb_deactivate(void)
 {
-	if(!esb_started)
+	if(!atomic_cas(&esb_started, 1, 0))
 	{
 		return;
 	}
 
-	esb_started = false;
 	atomic_clear(&session_connected);
 	atomic_inc(&session_generation);
 
@@ -1176,7 +1288,7 @@ void transport_esb_deactivate(void)
 		k_work_cancel_delayable_sync(&feature_response_fallback_work, &sync);
 	}
 
-	stop_and_flush();
+	(void)stop_and_flush();
 	valve_esb_backend_disable();
 	pending_session_clear();
 	clear_session_reports();

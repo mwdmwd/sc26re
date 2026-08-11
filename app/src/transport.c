@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 #include <errno.h>
 
+#include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/toolchain.h>
 
@@ -9,6 +10,7 @@
 LOG_MODULE_REGISTER(transport);
 
 static enum transport_usb_radio_mode usb_radio_mode;
+static K_MUTEX_DEFINE(radio_lifecycle_mutex);
 
 __weak bool transport_usb_attached(void)
 {
@@ -155,9 +157,20 @@ __weak int transport_esb_send_input_report(uint8_t report_id, const uint8_t *dat
 	return -ENOTSUP;
 }
 
-static int transport_start_radio(void)
+static bool transport_usb_radio_allowed_locked(void)
+{
+	return usb_radio_mode != TRANSPORT_USB_RADIO_OFF;
+}
+
+static int transport_start_radio_locked(void)
 {
 	int err;
+
+	/* USB may have entered radio-off mode while transport initialization was pending. */
+	if(transport_usb_attached() && !transport_usb_radio_allowed_locked())
+	{
+		return 0;
+	}
 
 	if(IS_ENABLED(CONFIG_IBEX_BLE) && radio_personality_get() == RADIO_PERSONALITY_BLE)
 	{
@@ -182,12 +195,22 @@ static int transport_start_radio(void)
 
 bool transport_usb_radio_allowed(void)
 {
-	return usb_radio_mode != TRANSPORT_USB_RADIO_OFF;
+	bool allowed;
+
+	k_mutex_lock(&radio_lifecycle_mutex, K_FOREVER);
+	allowed = transport_usb_radio_allowed_locked();
+	k_mutex_unlock(&radio_lifecycle_mutex);
+	return allowed;
 }
 
 static bool transport_usb_reports_suppressed(void)
 {
-	return usb_radio_mode == TRANSPORT_USB_RADIO_DIAGNOSTIC;
+	bool suppressed;
+
+	k_mutex_lock(&radio_lifecycle_mutex, K_FOREVER);
+	suppressed = usb_radio_mode == TRANSPORT_USB_RADIO_DIAGNOSTIC;
+	k_mutex_unlock(&radio_lifecycle_mutex);
+	return suppressed;
 }
 
 static bool transport_usb_radio_mode_valid(enum transport_usb_radio_mode mode)
@@ -199,7 +222,13 @@ static bool transport_usb_radio_mode_valid(enum transport_usb_radio_mode mode)
 
 const char *transport_usb_radio_mode_name(void)
 {
-	switch(usb_radio_mode)
+	enum transport_usb_radio_mode mode;
+
+	k_mutex_lock(&radio_lifecycle_mutex, K_FOREVER);
+	mode = usb_radio_mode;
+	k_mutex_unlock(&radio_lifecycle_mutex);
+
+	switch(mode)
 	{
 		case TRANSPORT_USB_RADIO_OFF:
 			return "off";
@@ -222,26 +251,28 @@ int transport_set_usb_radio_mode(enum transport_usb_radio_mode mode)
 	{
 		return -EINVAL;
 	}
+
+	k_mutex_lock(&radio_lifecycle_mutex, K_FOREVER);
 	if(mode == TRANSPORT_USB_RADIO_VBUS_CHARGE && transport_usb_configured())
 	{
 		mode = TRANSPORT_USB_RADIO_OFF;
 	}
 
 	old_mode = usb_radio_mode;
-	was_allowed = transport_usb_radio_allowed();
+	was_allowed = transport_usb_radio_allowed_locked();
 
 	if(old_mode == mode)
 	{
-		return 0;
+		goto out;
 	}
 
 	usb_radio_mode = mode;
 	if(!transport_usb_attached())
 	{
-		return 0;
+		goto out;
 	}
 
-	if(transport_usb_radio_allowed())
+	if(transport_usb_radio_allowed_locked())
 	{
 		if(usb_radio_mode == TRANSPORT_USB_RADIO_DIAGNOSTIC)
 		{
@@ -254,7 +285,7 @@ int transport_set_usb_radio_mode(enum transport_usb_radio_mode mode)
 
 		if(!was_allowed)
 		{
-			err = transport_start_radio();
+			err = transport_start_radio_locked();
 			if(err)
 			{
 				usb_radio_mode = old_mode;
@@ -270,15 +301,20 @@ int transport_set_usb_radio_mode(enum transport_usb_radio_mode mode)
 			transport_esb_deactivate();
 		}
 	}
+
+out:
+	k_mutex_unlock(&radio_lifecycle_mutex);
 	return err;
 }
 
 void transport_enter_usb_mode(void)
 {
 	radio_personality_cancel_pending_persist();
+	k_mutex_lock(&radio_lifecycle_mutex, K_FOREVER);
 
 	if(usb_radio_mode == TRANSPORT_USB_RADIO_DIAGNOSTIC)
 	{
+		k_mutex_unlock(&radio_lifecycle_mutex);
 		return;
 	}
 
@@ -290,6 +326,15 @@ void transport_enter_usb_mode(void)
 
 	transport_ble_deactivate();
 	transport_esb_deactivate();
+	k_mutex_unlock(&radio_lifecycle_mutex);
+}
+
+void transport_radio_deactivate(void)
+{
+	k_mutex_lock(&radio_lifecycle_mutex, K_FOREVER);
+	transport_ble_deactivate();
+	transport_esb_deactivate();
+	k_mutex_unlock(&radio_lifecycle_mutex);
 }
 
 int transport_init(void)
@@ -303,14 +348,20 @@ int transport_init(void)
 		{
 			return err;
 		}
-		if(transport_usb_attached() && !transport_usb_radio_allowed())
-		{
-			LOG_INF("USB attached; leaving radio transports inactive");
-			return 0;
-		}
 	}
 
-	return transport_start_radio();
+	k_mutex_lock(&radio_lifecycle_mutex, K_FOREVER);
+	if(transport_usb_attached() && !transport_usb_radio_allowed_locked())
+	{
+		LOG_INF("USB attached, leaving radio transports inactive");
+		err = 0;
+	}
+	else
+	{
+		err = transport_start_radio_locked();
+	}
+	k_mutex_unlock(&radio_lifecycle_mutex);
+	return err;
 }
 
 int transport_send(const struct controller_report *report)

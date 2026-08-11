@@ -128,6 +128,7 @@ int transport_init(void);
 int transport_send(const struct controller_report *report);
 int transport_send_battery_status(const struct controller_battery_report *report);
 int transport_send_input_report(uint8_t report_id, const uint8_t *data, size_t len);
+void transport_radio_deactivate(void);
 
 enum transport_usb_radio_mode
 {

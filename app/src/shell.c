@@ -326,7 +326,7 @@ static int cmd_radio_ble_disconnect(const struct shell *shell, size_t argc, char
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	transport_ble_deactivate();
+	transport_radio_deactivate();
 	shell_print(shell, "BLE transport disconnected/deactivated");
 	return 0;
 }

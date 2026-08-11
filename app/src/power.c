@@ -84,14 +84,7 @@ static void power_prepare_shutdown(void)
 	rgbw_led_prepare_poweroff();
 #endif
 
-	if(IS_ENABLED(CONFIG_IBEX_BLE))
-	{
-		transport_ble_deactivate();
-	}
-	if(IS_ENABLED(CONFIG_IBEX_ESB))
-	{
-		transport_esb_deactivate();
-	}
+	transport_radio_deactivate();
 }
 
 static void power_enter_system_off(void)
