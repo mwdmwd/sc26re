@@ -88,6 +88,7 @@ static bool latest_sflp_bias_valid;
 #endif
 
 K_MUTEX_DEFINE(imu_io_lock);
+K_MUTEX_DEFINE(imu_settings_mutex);
 
 #if IMU_HAS_DEVICE
 SENSOR_DT_STREAM_IODEV(imu_stream_iodev, DT_ALIAS(accel0),
@@ -866,11 +867,14 @@ int imu_read_report(struct controller_report *report)
 
 int imu_calibrate_gyro(void)
 {
+	float saved_bias[ARRAY_SIZE(gyro_bias)];
 	int err;
 
+	k_mutex_lock(&imu_settings_mutex, K_FOREVER);
 	k_mutex_lock(&imu_io_lock, K_FOREVER);
 	memcpy(gyro_bias, gyro_bias_candidate, sizeof(gyro_bias));
 	memcpy(staged_gyro_bias, gyro_bias, sizeof(staged_gyro_bias));
+	memcpy(saved_bias, gyro_bias, sizeof(saved_bias));
 	gyro_bias_dirty = false;
 	last_sflp_bias_update_us = 0;
 	k_mutex_unlock(&imu_io_lock);
@@ -879,20 +883,24 @@ int imu_calibrate_gyro(void)
 	if(err)
 	{
 		LOG_WRN("failed to program gyro bias: %d", err);
+		k_mutex_unlock(&imu_settings_mutex);
 		return err;
 	}
 
 	if(!IS_ENABLED(CONFIG_SETTINGS))
 	{
+		k_mutex_unlock(&imu_settings_mutex);
 		return 0;
 	}
 
-	err = settings_save_one(IMU_GYRO_BIAS_PATH, gyro_bias, sizeof(gyro_bias));
+	err = settings_save_one(IMU_GYRO_BIAS_PATH, saved_bias, sizeof(saved_bias));
 	if(err)
 	{
 		LOG_WRN("failed to save gyro bias: %d", err);
+		k_mutex_unlock(&imu_settings_mutex);
 		return err;
 	}
+	k_mutex_unlock(&imu_settings_mutex);
 	LOG_INF("saved gyro biases");
 	return 0;
 }
@@ -905,7 +913,9 @@ bool imu_settings_read(const char *path, uint8_t *buf, size_t capacity, size_t *
 		{
 			return false;
 		}
+		k_mutex_lock(&imu_io_lock, K_FOREVER);
 		memcpy(buf, mounting_matrix, sizeof(mounting_matrix));
+		k_mutex_unlock(&imu_io_lock);
 		*len = sizeof(mounting_matrix);
 		return true;
 	}
@@ -915,7 +925,9 @@ bool imu_settings_read(const char *path, uint8_t *buf, size_t capacity, size_t *
 		{
 			return false;
 		}
+		k_mutex_lock(&imu_io_lock, K_FOREVER);
 		sys_put_le32((uint32_t)gyro_dz_threshold, buf);
+		k_mutex_unlock(&imu_io_lock);
 		*len = sizeof(int32_t);
 		return true;
 	}
@@ -925,7 +937,9 @@ bool imu_settings_read(const char *path, uint8_t *buf, size_t capacity, size_t *
 		{
 			return false;
 		}
+		k_mutex_lock(&imu_io_lock, K_FOREVER);
 		memcpy(buf, gyro_bias, sizeof(gyro_bias));
+		k_mutex_unlock(&imu_io_lock);
 		*len = sizeof(gyro_bias);
 		return true;
 	}
@@ -944,9 +958,13 @@ int imu_settings_stage(const char *path, const uint8_t *value, size_t len)
 		{
 			return -EINVAL;
 		}
+		k_mutex_lock(&imu_settings_mutex, K_FOREVER);
+		k_mutex_lock(&imu_io_lock, K_FOREVER);
 		memcpy(staged_mounting_matrix, value, sizeof(staged_mounting_matrix));
 		memcpy(mounting_matrix, staged_mounting_matrix, sizeof(mounting_matrix));
 		mounting_matrix_dirty = true;
+		k_mutex_unlock(&imu_io_lock);
+		k_mutex_unlock(&imu_settings_mutex);
 		return 0;
 	}
 	if(strcmp(path, IMU_GYRO_DZ_THRESHOLD_PATH) == 0)
@@ -955,9 +973,13 @@ int imu_settings_stage(const char *path, const uint8_t *value, size_t len)
 		{
 			return -EINVAL;
 		}
+		k_mutex_lock(&imu_settings_mutex, K_FOREVER);
+		k_mutex_lock(&imu_io_lock, K_FOREVER);
 		staged_gyro_dz_threshold = (int32_t)sys_get_le32(value);
 		gyro_dz_threshold = staged_gyro_dz_threshold;
 		gyro_dz_threshold_dirty = true;
+		k_mutex_unlock(&imu_io_lock);
+		k_mutex_unlock(&imu_settings_mutex);
 		return 0;
 	}
 	if(strcmp(path, IMU_GYRO_BIAS_PATH) == 0)
@@ -971,6 +993,7 @@ int imu_settings_stage(const char *path, const uint8_t *value, size_t len)
 		{
 			return -ERANGE;
 		}
+		k_mutex_lock(&imu_settings_mutex, K_FOREVER);
 		k_mutex_lock(&imu_io_lock, K_FOREVER);
 		memcpy(staged_gyro_bias, received_bias, sizeof(staged_gyro_bias));
 		memcpy(gyro_bias, staged_gyro_bias, sizeof(gyro_bias));
@@ -979,6 +1002,7 @@ int imu_settings_stage(const char *path, const uint8_t *value, size_t len)
 		last_sflp_bias_update_us = 0;
 		k_mutex_unlock(&imu_io_lock);
 		err = program_gyro_bias();
+		k_mutex_unlock(&imu_settings_mutex);
 		if(err)
 		{
 			return err;
@@ -993,24 +1017,26 @@ static int commit_setting_if_dirty(const char *path, const void *value, size_t l
 {
 	int err;
 
+	k_mutex_lock(&imu_settings_mutex, K_FOREVER);
 	if(!*dirty)
 	{
+		k_mutex_unlock(&imu_settings_mutex);
 		return 0;
 	}
 	if(!IS_ENABLED(CONFIG_SETTINGS))
 	{
-		*dirty = false;
-		return 0;
+		err = 0;
 	}
-
-	err = settings_save_one(path, value, len);
-	if(err)
+	else
 	{
-		return err;
+		err = settings_save_one(path, value, len);
 	}
-
-	*dirty = false;
-	return 0;
+	if(!err)
+	{
+		*dirty = false;
+	}
+	k_mutex_unlock(&imu_settings_mutex);
+	return err;
 }
 
 int imu_settings_commit(const char *path)

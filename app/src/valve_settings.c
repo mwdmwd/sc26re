@@ -45,6 +45,8 @@ static struct esb_bond_slot esb_bonds[VALVE_ESB_BOND_SLOT_COUNT];
 static uint8_t wireless_transport;
 static bool wireless_transport_valid;
 static bool wireless_transport_dirty;
+K_MUTEX_DEFINE(esb_settings_mutex);
+K_MUTEX_DEFINE(valve_settings_commit_mutex);
 static struct k_spinlock active_esb_bond_lock;
 static uint8_t active_wireless_transport;
 static bool active_wireless_transport_valid;
@@ -180,6 +182,7 @@ void valve_settings_load_feature_state(void)
 		return;
 	}
 
+	k_mutex_lock(&esb_settings_mutex, K_FOREVER);
 	for(size_t slot = 0; slot < ARRAY_SIZE(esb_bonds); ++slot)
 	{
 		struct esb_bond_slot *bond_slot = &esb_bonds[slot];
@@ -211,6 +214,7 @@ void valve_settings_load_feature_state(void)
 	active_wireless_transport = wireless_transport;
 	active_wireless_transport_valid = wireless_transport_valid;
 	k_spin_unlock(&active_esb_bond_lock, key);
+	k_mutex_unlock(&esb_settings_mutex);
 	notify_esb_bond_changed();
 }
 
@@ -396,22 +400,36 @@ bool valve_settings_read(const char *path, uint8_t *buf, size_t capacity, size_t
 	{
 		const struct esb_bond *bond = &esb_bonds[slot].staged;
 
-		if(!bond->valid || capacity < sizeof(bond->data))
+		if(capacity < sizeof(bond->data))
 		{
 			return false;
 		}
+		k_mutex_lock(&esb_settings_mutex, K_FOREVER);
+		if(!bond->valid)
+		{
+			k_mutex_unlock(&esb_settings_mutex);
+			return false;
+		}
 		memcpy(buf, bond->data, sizeof(bond->data));
+		k_mutex_unlock(&esb_settings_mutex);
 		*len = sizeof(bond->data);
 		return true;
 	}
 
 	if(strcmp(path, VALVE_WIRELESS_TRANSPORT_PATH) == 0)
 	{
-		if(!wireless_transport_valid || capacity < sizeof(wireless_transport))
+		if(capacity < sizeof(wireless_transport))
 		{
 			return false;
 		}
+		k_mutex_lock(&esb_settings_mutex, K_FOREVER);
+		if(!wireless_transport_valid)
+		{
+			k_mutex_unlock(&esb_settings_mutex);
+			return false;
+		}
 		buf[0] = wireless_transport;
+		k_mutex_unlock(&esb_settings_mutex);
 		*len = sizeof(wireless_transport);
 		return true;
 	}
@@ -505,9 +523,11 @@ int valve_settings_stage(const char *path, const uint8_t *value, size_t len)
 		{
 			return -EINVAL;
 		}
+		k_mutex_lock(&esb_settings_mutex, K_FOREVER);
 		memcpy(bond_slot->staged.data, value, sizeof(bond_slot->staged.data));
 		bond_slot->staged.valid = true;
 		bond_slot->dirty = true;
+		k_mutex_unlock(&esb_settings_mutex);
 		LOG_INF("staged ESB bond slot %d over feature settings", slot);
 		return 0;
 	}
@@ -523,17 +543,20 @@ int valve_settings_stage(const char *path, const uint8_t *value, size_t len)
 			return -EINVAL;
 		}
 		selected_slot = esb_bond_slot_for_transport(value[0]);
+		k_mutex_lock(&esb_settings_mutex, K_FOREVER);
 		key = k_spin_lock(&active_esb_bond_lock);
 		selected_bond_available =
 		    selected_slot >= 0 && active_esb_bond_available_locked(selected_slot);
 		k_spin_unlock(&active_esb_bond_lock, key);
 		if(value[0] != 0 && !selected_bond_available)
 		{
+			k_mutex_unlock(&esb_settings_mutex);
 			return -EINVAL;
 		}
 		wireless_transport = value[0];
 		wireless_transport_valid = true;
 		wireless_transport_dirty = true;
+		k_mutex_unlock(&esb_settings_mutex);
 		return 0;
 	}
 
@@ -601,7 +624,7 @@ static int nvs_commit_path(const char *path)
 #endif
 }
 
-int valve_settings_commit(const char *path)
+static int commit_setting_path(const char *path)
 {
 	enum calibration_side side;
 	uint8_t setting_id;
@@ -614,15 +637,19 @@ int valve_settings_commit(const char *path)
 	{
 		struct esb_bond_slot *bond_slot = &esb_bonds[slot];
 		k_spinlock_key_t key;
+		uint32_t bond_id[2];
 
+		k_mutex_lock(&esb_settings_mutex, K_FOREVER);
 		if(!bond_slot->dirty)
 		{
+			k_mutex_unlock(&esb_settings_mutex);
 			return 0;
 		}
 		err = settings_save_one(esb_bond_paths[slot], bond_slot->staged.data,
 		                        sizeof(bond_slot->staged.data));
 		if(err)
 		{
+			k_mutex_unlock(&esb_settings_mutex);
 			LOG_ERR("failed to commit ESB bond slot %d: %d", slot, err);
 			return err;
 		}
@@ -630,8 +657,10 @@ int valve_settings_commit(const char *path)
 		key = k_spin_lock(&active_esb_bond_lock);
 		bond_slot->active = bond_slot->staged;
 		k_spin_unlock(&active_esb_bond_lock, key);
-		LOG_INF("committed ESB bond slot %d %08x/%08x", slot,
-		        sys_get_le32(&bond_slot->staged.data[0]), sys_get_le32(&bond_slot->staged.data[4]));
+		bond_id[0] = sys_get_le32(&bond_slot->staged.data[0]);
+		bond_id[1] = sys_get_le32(&bond_slot->staged.data[4]);
+		k_mutex_unlock(&esb_settings_mutex);
+		LOG_INF("committed ESB bond slot %d %08x/%08x", slot, bond_id[0], bond_id[1]);
 		notify_esb_bond_changed();
 		return 0;
 	}
@@ -640,14 +669,17 @@ int valve_settings_commit(const char *path)
 	{
 		k_spinlock_key_t key;
 
+		k_mutex_lock(&esb_settings_mutex, K_FOREVER);
 		if(!wireless_transport_dirty)
 		{
+			k_mutex_unlock(&esb_settings_mutex);
 			return 0;
 		}
 		err = settings_save_one(VALVE_WIRELESS_TRANSPORT_PATH, &wireless_transport,
 		                        sizeof(wireless_transport));
 		if(err)
 		{
+			k_mutex_unlock(&esb_settings_mutex);
 			LOG_ERR("failed to commit wireless transport: %d", err);
 			return err;
 		}
@@ -656,6 +688,7 @@ int valve_settings_commit(const char *path)
 		active_wireless_transport = wireless_transport;
 		active_wireless_transport_valid = wireless_transport_valid;
 		k_spin_unlock(&active_esb_bond_lock, key);
+		k_mutex_unlock(&esb_settings_mutex);
 		notify_esb_bond_changed();
 		return 0;
 	}
@@ -694,6 +727,16 @@ int valve_settings_commit(const char *path)
 	return -ENOENT;
 }
 
+int valve_settings_commit(const char *path)
+{
+	int err;
+
+	k_mutex_lock(&valve_settings_commit_mutex, K_FOREVER);
+	err = commit_setting_path(path);
+	k_mutex_unlock(&valve_settings_commit_mutex);
+	return err;
+}
+
 int valve_settings_save_esb_bond(uint8_t slot, const uint8_t *bond, size_t len, bool select)
 {
 	k_spinlock_key_t key;
@@ -717,6 +760,7 @@ int valve_settings_save_esb_bond(uint8_t slot, const uint8_t *bond, size_t len, 
 	{
 		struct esb_bond_slot *bond_slot = &esb_bonds[slot];
 
+		k_mutex_lock(&esb_settings_mutex, K_FOREVER);
 		bond_slot->dirty = false;
 		key = k_spin_lock(&active_esb_bond_lock);
 		bond_slot->active = bond_slot->staged;
@@ -730,6 +774,7 @@ int valve_settings_save_esb_bond(uint8_t slot, const uint8_t *bond, size_t len, 
 			active_wireless_transport_valid = true;
 		}
 		k_spin_unlock(&active_esb_bond_lock, key);
+		k_mutex_unlock(&esb_settings_mutex);
 		notify_esb_bond_changed();
 		return 0;
 	}
