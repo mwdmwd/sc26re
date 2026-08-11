@@ -230,6 +230,7 @@ static int gpio_greenpak_init(const struct device *dev)
 		err = gpio_pin_interrupt_configure_dt(&config->interrupt, GPIO_INT_EDGE_BOTH);
 		if(err)
 		{
+			(void)gpio_remove_callback(config->interrupt.port, &data->host_callback);
 			return err;
 		}
 	}
