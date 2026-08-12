@@ -60,9 +60,6 @@ static int8_t staged_mounting_matrix[9];
 static bool mounting_matrix_dirty;
 
 static uint16_t imu_mode;
-static uint16_t staged_imu_mode;
-static bool imu_mode_dirty;
-static bool imu_enabled;
 
 static int32_t gyro_dz_threshold;
 static int32_t staged_gyro_dz_threshold;
@@ -74,7 +71,6 @@ static float gyro_bias_candidate[3];
 static bool gyro_bias_dirty;
 
 static int64_t last_sflp_bias_update_us;
-static bool registry_callback_replay;
 static struct controller_report cached_imu_report;
 static struct k_spinlock cached_imu_report_lock;
 #if IMU_HAS_DEVICE
@@ -342,23 +338,17 @@ static int program_gyro_bias(void)
 #endif
 }
 
-static int set_motion_trigger_enabled(bool enabled)
+static void set_motion_trigger_enabled(bool enabled)
 {
 #if IMU_HAS_DEVICE
-	atomic_val_t previous;
-
-	k_mutex_lock(&imu_io_lock, K_FOREVER);
-	previous = atomic_set(&imu_motion_trigger_enabled, enabled ? 1 : 0);
-	k_mutex_unlock(&imu_io_lock);
+	atomic_val_t previous = atomic_set(&imu_motion_trigger_enabled, enabled ? 1 : 0);
 
 	if(enabled && previous == 0)
 	{
 		k_sem_give(&imu_stream_start_sem);
 	}
-	return 0;
 #else
 	ARG_UNUSED(enabled);
-	return 0;
 #endif
 }
 
@@ -370,31 +360,32 @@ void imu_reset(void)
 
 static void apply_mode(uint16_t mode)
 {
-	bool was_enabled = imu_enabled;
+	bool was_enabled;
 	bool enabled = mode != SETTING_GYRO_MODE_OFF;
-	uint16_t old_mode = imu_mode;
+	uint16_t old_mode;
 
+	k_mutex_lock(&imu_io_lock, K_FOREVER);
+	old_mode = imu_mode;
+	was_enabled = old_mode != SETTING_GYRO_MODE_OFF;
 	imu_mode = mode;
-	imu_enabled = enabled;
+	k_mutex_unlock(&imu_io_lock);
 	if(enabled && (!was_enabled || old_mode != mode))
 	{
 		imu_reset();
 	}
-	if(old_mode != mode || was_enabled != enabled)
+	if(was_enabled != enabled)
 	{
-		(void)set_motion_trigger_enabled(enabled);
+		set_motion_trigger_enabled(enabled);
 	}
 }
 
 static void setting_changed(uint8_t id, int16_t value)
 {
-	if(id != IBEX_SETTING_IMU_MODE || registry_callback_replay)
+	if(id != IBEX_SETTING_IMU_MODE)
 	{
 		return;
 	}
 
-	staged_imu_mode = (uint16_t)value;
-	imu_mode_dirty = true;
 	apply_mode((uint16_t)value);
 }
 
@@ -445,7 +436,7 @@ static bool load_setting_exact(const char *path, void *value, size_t value_size)
 
 static void load_persisted_settings(void)
 {
-	uint16_t loaded_mode;
+	int16_t loaded_mode;
 	int32_t loaded_threshold;
 	float loaded_bias[3];
 	int8_t loaded_matrix[9];
@@ -476,14 +467,12 @@ static void load_persisted_settings(void)
 	}
 	if(load_setting_exact(IMU_MODE_PATH, &loaded_mode, sizeof(loaded_mode)))
 	{
-		(void)ibex_setting_set(IBEX_SETTING_IMU_MODE, (int16_t)loaded_mode);
-		apply_mode(loaded_mode);
+		(void)ibex_setting_set(IBEX_SETTING_IMU_MODE, loaded_mode);
 	}
 
 	memcpy(staged_mounting_matrix, mounting_matrix, sizeof(staged_mounting_matrix));
 	staged_gyro_dz_threshold = gyro_dz_threshold;
 	memcpy(staged_gyro_bias, gyro_bias, sizeof(staged_gyro_bias));
-	staged_imu_mode = imu_mode;
 }
 
 int imu_init(void)
@@ -494,9 +483,7 @@ int imu_init(void)
 
 	load_persisted_settings();
 
-	registry_callback_replay = true;
 	err = ibex_settings_register_callback(setting_changed);
-	registry_callback_replay = false;
 	if(err)
 	{
 		LOG_WRN("failed to register IMU setting callback: %d", err);
@@ -510,13 +497,6 @@ int imu_init(void)
 	}
 	else
 	{
-		err = program_gyro_bias();
-		if(err)
-		{
-			LOG_WRN("failed to program gyro bias: %d", err);
-		}
-
-		(void)set_motion_trigger_enabled(imu_enabled);
 		k_thread_create(&imu_stream_thread, imu_stream_stack,
 		                K_THREAD_STACK_SIZEOF(imu_stream_stack), imu_stream_thread_main, NULL, NULL,
 		                NULL, K_PRIO_PREEMPT(IMU_STREAM_THREAD_PRIORITY), K_FP_REGS, K_NO_WAIT);
@@ -870,7 +850,12 @@ static void imu_stream_thread_main(void *arg1, void *arg2, void *arg3)
 
 int imu_read_report(struct controller_report *report)
 {
-	if(!imu_enabled)
+	bool enabled;
+
+	k_mutex_lock(&imu_io_lock, K_FOREVER);
+	enabled = imu_mode != SETTING_GYRO_MODE_OFF;
+	k_mutex_unlock(&imu_io_lock);
+	if(!enabled)
 	{
 		return 0;
 	}
@@ -914,16 +899,6 @@ int imu_calibrate_gyro(void)
 
 bool imu_settings_read(const char *path, uint8_t *buf, size_t capacity, size_t *len)
 {
-	if(strcmp(path, IMU_MODE_PATH) == 0)
-	{
-		if(capacity < sizeof(uint16_t))
-		{
-			return false;
-		}
-		sys_put_le16(imu_mode, buf);
-		*len = sizeof(uint16_t);
-		return true;
-	}
 	if(strcmp(path, IMU_MOUNTING_MATRIX_PATH) == 0)
 	{
 		if(capacity < sizeof(mounting_matrix))
@@ -963,18 +938,6 @@ int imu_settings_stage(const char *path, const uint8_t *value, size_t len)
 	float received_bias[3];
 	int err;
 
-	if(strcmp(path, IMU_MODE_PATH) == 0)
-	{
-		if(len != sizeof(uint16_t))
-		{
-			return -EINVAL;
-		}
-		staged_imu_mode = sys_get_le16(value);
-		imu_mode_dirty = true;
-		(void)ibex_setting_set(IBEX_SETTING_IMU_MODE, (int16_t)staged_imu_mode);
-		apply_mode(staged_imu_mode);
-		return 0;
-	}
 	if(strcmp(path, IMU_MOUNTING_MATRIX_PATH) == 0)
 	{
 		if(len != sizeof(mounting_matrix))
@@ -1052,11 +1015,6 @@ static int commit_setting_if_dirty(const char *path, const void *value, size_t l
 
 int imu_settings_commit(const char *path)
 {
-	if(strcmp(path, IMU_MODE_PATH) == 0)
-	{
-		return commit_setting_if_dirty(path, &staged_imu_mode, sizeof(staged_imu_mode),
-		                               &imu_mode_dirty);
-	}
 	if(strcmp(path, IMU_MOUNTING_MATRIX_PATH) == 0)
 	{
 		return commit_setting_if_dirty(path, staged_mounting_matrix, sizeof(staged_mounting_matrix),
