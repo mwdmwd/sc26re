@@ -355,7 +355,9 @@ static void set_motion_trigger_enabled(bool enabled)
 
 void imu_reset(void)
 {
+	k_mutex_lock(&imu_io_lock, K_FOREVER);
 	last_sflp_bias_update_us = 0;
+	k_mutex_unlock(&imu_io_lock);
 	(void)program_gyro_bias();
 }
 
