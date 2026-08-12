@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <string.h>
 
+#include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/byteorder.h>
@@ -133,6 +134,7 @@ static ibex_setting_changed_cb_t callbacks[IBEX_SETTINGS_MAX_CALLBACKS];
 static ibex_setting_changed_cb_t set_callbacks[IBEX_SETTINGS_MAX_CALLBACKS];
 static uint8_t callback_count;
 static uint8_t set_callback_count;
+static K_MUTEX_DEFINE(registry_mutex);
 
 static bool validate_id(uint8_t id)
 {
@@ -211,11 +213,13 @@ static int haptics_settings_set(const char *name, size_t len, settings_read_cb r
 	}
 	value = (int16_t)sys_get_le16(encoded);
 	value = CLAMP(value, setting_entries[id].min_value, setting_entries[id].max_value);
+	k_mutex_lock(&registry_mutex, K_FOREVER);
 	if(setting_values[id] != value)
 	{
 		setting_values[id] = value;
 		notify_changed(id, value);
 	}
+	k_mutex_unlock(&registry_mutex);
 	return 0;
 }
 
@@ -239,6 +243,7 @@ void ibex_settings_registry_init(void)
 
 void ibex_settings_registry_reset_defaults(void)
 {
+	k_mutex_lock(&registry_mutex, K_FOREVER);
 	for(uint8_t i = 0; i < IBEX_SETTING_COUNT; ++i)
 	{
 		if(setting_values[i] != setting_entries[i].default_value)
@@ -246,11 +251,8 @@ void ibex_settings_registry_reset_defaults(void)
 			setting_values[i] = setting_entries[i].default_value;
 			notify_changed(i, setting_values[i]);
 		}
-		else
-		{
-			setting_values[i] = setting_entries[i].default_value;
-		}
 	}
+	k_mutex_unlock(&registry_mutex);
 }
 
 bool ibex_setting_get(uint8_t id, int16_t *value)
@@ -259,7 +261,9 @@ bool ibex_setting_get(uint8_t id, int16_t *value)
 	{
 		return false;
 	}
+	k_mutex_lock(&registry_mutex, K_FOREVER);
 	*value = setting_values[id];
+	k_mutex_unlock(&registry_mutex);
 	return true;
 }
 
@@ -269,7 +273,9 @@ bool ibex_setting_get_meta(uint8_t id, enum ibex_setting_kind kind, int16_t *val
 	{
 		return false;
 	}
+	k_mutex_lock(&registry_mutex, K_FOREVER);
 	*value = setting_meta_value(id, kind);
+	k_mutex_unlock(&registry_mutex);
 	return true;
 }
 
@@ -310,19 +316,23 @@ int ibex_setting_set(uint8_t id, int16_t value)
 	}
 
 	clamped = CLAMP(value, setting_entries[id].min_value, setting_entries[id].max_value);
+	k_mutex_lock(&registry_mutex, K_FOREVER);
 	if(setting_values[id] != clamped)
 	{
 		setting_values[id] = clamped;
 		notify_changed(id, clamped);
 	}
 	notify_set(id, clamped);
+	k_mutex_unlock(&registry_mutex);
 	return 0;
 }
 
 int ibex_settings_register_callback(ibex_setting_changed_cb_t callback)
 {
+	k_mutex_lock(&registry_mutex, K_FOREVER);
 	if(callback_count >= ARRAY_SIZE(callbacks))
 	{
+		k_mutex_unlock(&registry_mutex);
 		return -ENOMEM;
 	}
 	callbacks[callback_count++] = callback;
@@ -330,13 +340,16 @@ int ibex_settings_register_callback(ibex_setting_changed_cb_t callback)
 	{
 		callback(i, setting_values[i]);
 	}
+	k_mutex_unlock(&registry_mutex);
 	return 0;
 }
 
 int ibex_settings_register_set_callback(ibex_setting_changed_cb_t callback)
 {
+	k_mutex_lock(&registry_mutex, K_FOREVER);
 	if(set_callback_count >= ARRAY_SIZE(set_callbacks))
 	{
+		k_mutex_unlock(&registry_mutex);
 		return -ENOMEM;
 	}
 	set_callbacks[set_callback_count++] = callback;
@@ -344,6 +357,7 @@ int ibex_settings_register_set_callback(ibex_setting_changed_cb_t callback)
 	{
 		callback(i, setting_values[i]);
 	}
+	k_mutex_unlock(&registry_mutex);
 	return 0;
 }
 
