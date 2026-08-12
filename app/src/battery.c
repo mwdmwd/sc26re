@@ -12,10 +12,6 @@
 
 #if CONFIG_IBEX_BATTERY
 
-#if defined(CONFIG_BT_BAS)
-#include <zephyr/bluetooth/services/bas.h>
-#endif
-
 LOG_MODULE_REGISTER(battery);
 
 #define MP2733_NODE DT_NODELABEL(mp2733)
@@ -356,14 +352,6 @@ static int battery_poll_once(struct controller_battery_report *report)
 	return 0;
 }
 
-static void battery_publish(const struct controller_battery_report *report)
-{
-#if defined(CONFIG_BT_BAS)
-	(void)bt_bas_set_battery_level(report->level_percent);
-#endif
-	(void)transport_send_battery_status(report);
-}
-
 int battery_read_fresh_status(struct controller_battery_report *report)
 {
 	int err;
@@ -407,7 +395,7 @@ static void battery_thread_entry(void *p1, void *p2, void *p3)
 		}
 		else
 		{
-			battery_publish(&report);
+			(void)transport_send_battery_status(&report);
 			LOG_INF("%u%% %umV state=%s input=%umV ichg=%umA type=%u", report.level_percent,
 			        report.battery_mv, battery_charge_state_name(report.charge_state),
 			        report.input_mv, report.current_ma, report.charger_type);
