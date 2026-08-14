@@ -415,13 +415,23 @@ def hid_exchange(
     payload: bytes = b"",
     *,
     expect_response: bool = True,
+    allow_disconnect: bool = False,
     timeout: float = 0.5,
 ) -> bytes | None:
     report = bytearray(HID_FEATURE_REPORT_SIZE)
     report[0] = report_id
     report[1] = opcode
     report[2 : 2 + len(payload)] = payload
-    handle.send_feature_report(bytes(report))
+    try:
+        written = handle.send_feature_report(bytes(report))
+    except Exception as exc:
+        raise ToolError(f"ERROR: HID feature report 0x{opcode:02x} write failed") from exc
+    if written != len(report):
+        if allow_disconnect and not expect_response and written == -1:
+            return None
+        raise ToolError(
+            f"ERROR: HID feature report 0x{opcode:02x} short write: " f"{written!r}/{len(report)}"
+        )
     if not expect_response:
         return None
     deadline = time.monotonic() + timeout
@@ -802,7 +812,15 @@ def send_hid_reboot_to_bootloader(device: Device) -> None:
     try:
         handle = open_hid_device(device.hid_path)
         report_id = 0x02 if device.fw_class == "proteus" and device.bcd_version == 2 else 0x01
-        hid_exchange(handle, report_id, 0x90, expect_response=False)
+        # A successful reboot can disconnect USB before hidapi observes the
+        # control-transfer completion, which it reports as a write failure.
+        hid_exchange(
+            handle,
+            report_id,
+            0x90,
+            expect_response=False,
+            allow_disconnect=True,
+        )
     finally:
         if handle is not None:
             close_device(handle)
@@ -812,7 +830,13 @@ def send_hid_normal_reboot(device: Device) -> None:
     handle = None
     try:
         handle = open_hid_device(device.hid_path)
-        hid_exchange(handle, 0x01, 0x95, expect_response=False)
+        hid_exchange(
+            handle,
+            0x01,
+            0x95,
+            expect_response=False,
+            allow_disconnect=True,
+        )
     finally:
         if handle is not None:
             close_device(handle)
