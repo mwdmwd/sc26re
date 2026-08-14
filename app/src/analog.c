@@ -308,6 +308,7 @@ int analog_puck_pilot_present(bool *present)
 	};
 	int16_t raw;
 	int32_t mv;
+	int disable_err;
 	int err;
 
 	if(present == NULL)
@@ -345,8 +346,8 @@ int analog_puck_pilot_present(bool *present)
 	err = 0;
 
 out_disable:
-	(void)analog_inputs_put();
-	return err;
+	disable_err = analog_inputs_put();
+	return err ? err : disable_err;
 }
 
 int analog_battery_voltage_samples_mv(uint16_t *samples, size_t sample_count)
@@ -443,6 +444,7 @@ int analog_read_report(struct controller_report *report)
 		.buffer_size = sizeof(samples),
 		.resolution = 12,
 	};
+	int disable_err;
 	int err;
 
 	if(!analog_ready)
@@ -457,10 +459,10 @@ int analog_read_report(struct controller_report *report)
 	}
 
 	err = adc_read(analog_channels[0].dev, &sequence);
-	(void)analog_inputs_put();
-	if(err)
+	disable_err = analog_inputs_put();
+	if(err || disable_err)
 	{
-		return err;
+		return err ? err : disable_err;
 	}
 
 	for(size_t sample = 0; sample < ANALOG_SAMPLE_COUNT; ++sample)
@@ -509,7 +511,5 @@ int analog_read_report(struct controller_report *report)
 		report->buttons |= BIT(CONTROLLER_BUTTON_RIGHT_TRIGGER_CLICK);
 	}
 
-	err = 0;
-
-	return err;
+	return 0;
 }
