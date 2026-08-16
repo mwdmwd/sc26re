@@ -669,13 +669,13 @@ static void channel_start_pcm(struct ibex_haptics_channel_state *state, size_t i
 	}
 
 	pcm_init_decode_default(state, channel_sample_rate_hz(index));
+	start = state->pcm_configured &&
+	        state->kind != IBEX_HAPTICS_EFFECT_PCM &&
+	        state->pcm_count > state->pcm_start_threshold_bytes;
 	for(uint8_t i = 0; i < sample_count; ++i)
 	{
 		pcm_ring_push(state, haptics_pcm_buffers[index], samples[i]);
 	}
-	start = state->pcm_configured &&
-	        state->kind != IBEX_HAPTICS_EFFECT_PCM &&
-	        state->pcm_count >= state->pcm_start_threshold_bytes;
 	if(start)
 	{
 		state->kind = IBEX_HAPTICS_EFFECT_PCM;
