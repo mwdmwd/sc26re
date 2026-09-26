@@ -30,14 +30,19 @@ Currently working at least partially:
 
 ### TODO
 
+Stock firmware parity target: `IBEX_FW_6A628345.fw`
+
 - [x] Olympus touchpad
   - [ ] Exactly OFW-matching pressure/click/deadzone behavior
   - [x] External power compensation
+  - [ ] Update Timp firmware at startup when needed
+  - [ ] Match newer battery-mode electrode scaling
 - [x] Analog inputs
   - [ ] Trigger neutral deadzone seems too large
 - [x] Buttons
   - [x] GreenPAK buttons
   - [x] Grip sense
+  - [ ] Per-input debounce (including B-button repeated-press fix)
 - [ ] Power
   - [x] Power-button long-hold system-off path
   - [x] Sleep mode
@@ -45,27 +50,32 @@ Currently working at least partially:
   - [x] Battery level
   - [x] Charger detection
   - [x] Adjust charger settings based on power source
+  - [ ] Match puck-detachment debounce and wireless shutdown/wake transitions
 - [ ] LEDs
   - [x] RGBW LED
+  - [ ] Identify and implement the new setting 38 LED behavior
   - [ ] IR LED
 - [x] Ibex settings registry
+  - [x] IMU bias-use and gyro calibration threshold settings (IDs 84 and 85)
+  - [ ] Identify setting 83's behavior
   - [ ] Expand firmware consumers beyond IMU paths
 - [x] ESB
   - [x] ESB bonding over BLE
   - [x] ESB bonding over USB
-  - [ ] Expose ESB bonds over HID commands
+  - [x] Expose ESB bonds over HID commands
+  - [ ] Verify the newer bond-slot selection and reconnect transitions
 - [x] BLE
   - [ ] After startup/reconnect, Steam sometimes ignores input until the Steam button is pressed
 - [x] Personality switching (BLE, ESB, USB)
   - [x] Over UART
   - [x] Over BLE, mainly for ESB bonding
   - [x] With R1+A / R1+B boot chords
-    - [ ] Second ESB bond with L1+A
+    - [x] Second ESB bond with L1+A
 - [x] Haptics
 - [ ] Freefall detection
   - [ ] Wilhelm scream
-- [ ] Puck / Proteus / Nereid
-  - [ ] Puck detection/wired communication(?)
+- [x] Puck / Proteus / Nereid
+  - [x] Puck detection/wired communication
   - [ ] Puck firmware reimplementation
 
 ## Repository layout
