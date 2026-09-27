@@ -1,0 +1,724 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SC26re user <@>
+Date: Sun, 27 Sep 2026 02:00:00 +0200
+Subject: [PATCH] drivers: sensor: expose Ibex gyro calibration threshold
+
+---
+ drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.c     | 141 +++++++++++++++
+ drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.h     |   3 +
+ .../sensor/st/lsm6dsv16x/lsm6dsv16x_rtio.h    |   1 +
+ .../st/lsm6dsv16x/lsm6dsv16x_rtio_stream.c    |  65 ++++++-
+ include/zephyr/drivers/sensor/lsm6dsv16x.h    |   5 +
+ .../lsm6dsv16x_stream/src/lsm6dsv16x_emul.c   |  64 +++++++
+ .../lsm6dsv16x_stream/src/lsm6dsv16x_emul.h   |   7 +
+ .../sensor/lsm6dsv16x_stream/src/main.c       | 162 +++++++++++++++++-
+ 8 files changed, 434 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.c b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.c
+index cf84db03b78..5b63a787512 100644
+--- a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.c
++++ b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.c
+@@ -19,6 +19,7 @@
+ #include <zephyr/logging/log.h>
+ 
+ #include <zephyr/drivers/sensor/lsm6dsvxxx.h>
++#include <zephyr/drivers/sensor/lsm6dsv16x.h>
+ #include <zephyr/dt-bindings/sensor/lsm6dsv16x.h>
+ #include "lsm6dsv16x.h"
+ #include "lsm6dsv16x_decoder.h"
+@@ -602,6 +603,138 @@ static int lsm6dsv16x_gyro_range_set(const struct device *dev, int32_t range)
+ 	return 0;
+ }
+ 
++/* Convert the positive threshold used by the embedded calibration engine to binary16. */
++static uint16_t lsm6dsv16x_positive_float_to_half(float value)
++{
++	uint32_t bits;
++	uint32_t significand;
++	uint32_t rounded;
++	uint32_t remainder;
++	uint32_t halfway;
++	int32_t exponent;
++	int32_t shift;
++
++	memcpy(&bits, &value, sizeof(bits));
++	if (value == 0.0f) {
++		return 0;
++	}
++	exponent = (int32_t)((bits >> 23) & 0xffU) - 127;
++	significand = (bits & 0x7fffffU) | 0x800000U;
++	shift = exponent < -14 ? -exponent - 1 : 13;
++	rounded = significand >> shift;
++	remainder = significand & ((1U << shift) - 1U);
++	halfway = 1U << (shift - 1);
++	if (remainder > halfway || (remainder == halfway && (rounded & 1U) != 0U)) {
++		++rounded;
++	}
++	if (exponent < -14) {
++		return (uint16_t)rounded;
++	}
++	return (uint16_t)(((exponent + 15) << 10) + rounded - 0x400U);
++}
++
++static int lsm6dsv16x_gyro_calibration_threshold_set(const struct device *dev, uint8_t percent)
++{
++	/* Ibex 6A628345 pauses SFLP, then writes a binary16 value to embedded page 0,
++	 * address 0x98. That address is absent from ST's public register names.
++	 */
++	const struct lsm6dsv16x_config *cfg = dev->config;
++	stmdev_ctx_t *ctx = (stmdev_ctx_t *)&cfg->ctx;
++	float threshold = (float)percent * 0.0025641f / 100.0f;
++	uint16_t half = lsm6dsv16x_positive_float_to_half(threshold);
++	uint8_t saved_enable;
++	uint8_t value;
++	bool saved_valid = false;
++	bool page_write_enabled = false;
++	int ret;
++
++#ifdef CONFIG_LSM6DSV16X_STREAM
++	struct lsm6dsv16x_data *data = dev->data;
++
++	/* Wait for the entire asynchronous FIFO read, not just one bus transaction. */
++	k_sem_take(&data->stream_io, K_FOREVER);
++#endif
++	ret = lsm6dsv16x_mem_bank_set(ctx, LSM6DSV16X_EMBED_FUNC_MEM_BANK);
++	if (ret != 0) {
++		ret = -EIO;
++		goto unlock;
++	}
++	ret = lsm6dsv16x_read_reg(ctx, LSM6DSV16X_EMB_FUNC_EN_A, &saved_enable, 1);
++	if (ret != 0) {
++		goto restore;
++	}
++	saved_valid = true;
++	value = 3;
++	ret = lsm6dsv16x_write_reg(ctx, LSM6DSV16X_PAGE_SEL, &value, 1);
++	if (ret != 0) {
++		goto restore;
++	}
++	value = 0;
++	ret = lsm6dsv16x_write_reg(ctx, LSM6DSV16X_EMB_FUNC_EN_A, &value, 1);
++	if (ret != 0) {
++		goto restore;
++	}
++	ret = lsm6dsv16x_write_reg(ctx, LSM6DSV16X_EMB_FUNC_INIT_A, &value, 1);
++	if (ret != 0) {
++		goto restore;
++	}
++	value = 1;
++	ret = lsm6dsv16x_write_reg(ctx, LSM6DSV16X_PAGE_SEL, &value, 1);
++	if (ret != 0) {
++		goto restore;
++	}
++	for (unsigned int attempt = 0; attempt < 1000U; ++attempt) {
++		ret = lsm6dsv16x_read_reg(ctx, LSM6DSV16X_EMB_FUNC_EXEC_STATUS, &value, 1);
++		if (ret != 0 || (value & 1U) != 0U) {
++			break;
++		}
++	}
++	if (ret != 0) {
++		goto restore;
++	}
++	if ((value & 1U) == 0U) {
++		ret = -ETIMEDOUT;
++		goto restore;
++	}
++	value = 0x40;
++	ret = lsm6dsv16x_write_reg(ctx, LSM6DSV16X_PAGE_RW, &value, 1);
++	if (ret != 0) {
++		goto restore;
++	}
++	page_write_enabled = true;
++	value = 0x98;
++	ret = lsm6dsv16x_write_reg(ctx, LSM6DSV16X_PAGE_ADDRESS, &value, 1);
++	if (ret != 0) {
++		goto restore;
++	}
++	value = (uint8_t)half;
++	ret = lsm6dsv16x_write_reg(ctx, LSM6DSV16X_PAGE_VALUE, &value, 1);
++	if (ret != 0) {
++		goto restore;
++	}
++	value = (uint8_t)(half >> 8);
++	ret = lsm6dsv16x_write_reg(ctx, LSM6DSV16X_PAGE_VALUE, &value, 1);
++
++restore:
++	value = 0;
++	if (page_write_enabled && lsm6dsv16x_write_reg(ctx, LSM6DSV16X_PAGE_RW,
++	                                                &value, 1) != 0 && ret == 0) {
++		ret = -EIO;
++	}
++	if (saved_valid && lsm6dsv16x_write_reg(ctx, LSM6DSV16X_EMB_FUNC_EN_A,
++	                                      &saved_enable, 1) != 0 && ret == 0) {
++		ret = -EIO;
++	}
++	if (lsm6dsv16x_mem_bank_set(ctx, LSM6DSV16X_MAIN_MEM_BANK) != 0 && ret == 0) {
++		ret = -EIO;
++	}
++unlock:
++#ifdef CONFIG_LSM6DSV16X_STREAM
++	k_sem_give(&data->stream_io);
++#endif
++	return ret < 0 ? ret : 0;
++}
++
+ static int lsm6dsv16x_gyro_config(const struct device *dev,
+ 			       enum sensor_channel chan,
+ 			       enum sensor_attribute attr,
+@@ -612,6 +745,11 @@ static int lsm6dsv16x_gyro_config(const struct device *dev,
+ 	lsm6dsv16x_gy_mode_t mode;
+ 
+ 	switch (attr) {
++	case SENSOR_ATTR_LSM6DSV16X_GYRO_CALIBRATION_THRESHOLD:
++		if (val->val1 < 0 || val->val1 > UINT8_MAX || val->val2 != 0) {
++			return -EINVAL;
++		}
++		return lsm6dsv16x_gyro_calibration_threshold_set(dev, (uint8_t)val->val1);
+ 	case SENSOR_ATTR_FULL_SCALE:
+ 		return lsm6dsv16x_gyro_range_set(dev, sensor_rad_to_degrees(val));
+ 	case SENSOR_ATTR_SAMPLING_FREQUENCY:
+@@ -1450,6 +1588,9 @@ static int lsm6dsv16x_init(const struct device *dev)
+ 	LOG_INF("Initialize device %s", dev->name);
+ 	data->dev = dev;
+ 
++#ifdef CONFIG_LSM6DSV16X_STREAM
++	lsm6dsv16x_stream_init(dev);
++#endif
+ 	if (lsm6dsv16x_init_chip(dev) < 0) {
+ 		LOG_DBG("failed to initialize chip");
+ 		return -EIO;
+diff --git a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.h b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.h
+index 390632b2afe..2bcfbb6fd6e 100644
+--- a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.h
++++ b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x.h
+@@ -167,6 +167,9 @@ struct lsm6dsv16x_data {
+ 	uint8_t gyro_fs;
+ 
+ #ifdef CONFIG_LSM6DSV16X_STREAM
++	/* May be acquired in an IRQ and released by the final bus callback. */
++	struct k_sem stream_io;
++	struct k_work stream_irq_work;
+ 	struct rtio_iodev_sqe *streaming_sqe;
+ 	struct rtio *rtio_ctx;
+ 	struct rtio_iodev *iodev;
+diff --git a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_rtio.h b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_rtio.h
+index dc32327c852..ceaedc1abde 100644
+--- a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_rtio.h
++++ b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_rtio.h
+@@ -20,6 +20,7 @@ int lsm6dsv16x_gbias_get_config(const struct device *dev, enum sensor_channel ch
+ void lsm6dsv16x_submit(const struct device *sensor, struct rtio_iodev_sqe *iodev_sqe);
+ 
+ void lsm6dsv16x_submit_stream(const struct device *sensor, struct rtio_iodev_sqe *iodev_sqe);
++void lsm6dsv16x_stream_init(const struct device *dev);
+ void lsm6dsv16x_stream_irq_handler(const struct device *dev);
+ 
+ #endif /* ZEPHYR_DRIVERS_SENSOR_LSM6DSV16X_RTIO_H_ */
+diff --git a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_rtio_stream.c b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_rtio_stream.c
+index 8cb37c220b6..3d3bdcea2d2 100644
+--- a/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_rtio_stream.c
++++ b/drivers/sensor/st/lsm6dsv16x/lsm6dsv16x_rtio_stream.c
+@@ -26,6 +26,8 @@ static void lsm6dsv16x_complete_streaming_sqe(struct lsm6dsv16x_data *data, int
+ 		/* Force a clean FIFO setup when the application restarts the stream. */
+ 		data->trig_cfg = (struct trigger_config){ 0 };
+ 	}
++	/* No bus operations may follow this release, including FIFO DROP writes. */
++	k_sem_give(&data->stream_io);
+ 	if (result < 0) {
+ 		rtio_iodev_sqe_err(wip, result);
+ 	} else {
+@@ -278,6 +280,7 @@ void lsm6dsv16x_submit_stream(const struct device *dev, struct rtio_iodev_sqe *i
+ 		return;
+ 	}
+ 
++	k_sem_take(&lsm6dsv16x->stream_io, K_FOREVER);
+ 	if (!ON_I3C_BUS(config) || (I3C_INT_PIN(config))) {
+ 		gpio_pin_interrupt_configure_dt(lsm6dsv16x->drdy_gpio, GPIO_INT_DISABLE);
+ 	}
+@@ -314,6 +317,7 @@ void lsm6dsv16x_submit_stream(const struct device *dev, struct rtio_iodev_sqe *i
+ 		 */
+ 		gpio_pin_interrupt_configure_dt(lsm6dsv16x->drdy_gpio, GPIO_INT_LEVEL_ACTIVE);
+ 	}
++	k_sem_give(&lsm6dsv16x->stream_io);
+ }
+ 
+ static int lsm6dsv16x_read_reg_async(const struct device *dev, uint8_t reg_addr, uint8_t *buf,
+@@ -440,9 +444,6 @@ static void lsm6dsv16x_read_fifo_cb(struct rtio *r, const struct rtio_sqe *sqe,
+ 			return;
+ 		}
+ 
+-		/* complete request with ok */
+-		lsm6dsv16x_complete_streaming_sqe(lsm6dsv16x, 0);
+-
+ 		if (data_opt == SENSOR_STREAM_DATA_DROP) {
+ 
+ 			/*
+@@ -452,18 +453,29 @@ static void lsm6dsv16x_read_fifo_cb(struct rtio *r, const struct rtio_sqe *sqe,
+ 			 *
+ 			 *   lsm6dsv16x_fifo_mode_set(ctx, LSM6DSV16X_BYPASS_MODE);
+ 			 */
+-			struct rtio_sqe *write_fifo_mode = rtio_sqe_acquire(rtio);
++			struct rtio_sqe *sqes[2];
+ 			uint8_t lsm6dsv16x_fifo_mode_set[] = {
+ 				LSM6DSV16X_FIFO_CTRL4,
+ 				LSM6DSV16X_BYPASS_MODE,
+ 			};
+ 
+-			write_fifo_mode->flags |= RTIO_SQE_NO_RESPONSE;
+-			rtio_sqe_prep_tiny_write(write_fifo_mode, iodev,
++			result = rtio_sqe_acquire_array(rtio, ARRAY_SIZE(sqes), sqes);
++			if (result != 0) {
++				lsm6dsv16x_complete_streaming_sqe(lsm6dsv16x, result);
++				return;
++			}
++			rtio_sqe_prep_tiny_write(sqes[0], iodev,
+ 						 RTIO_PRIO_NORM, lsm6dsv16x_fifo_mode_set,
+ 						 ARRAY_SIZE(lsm6dsv16x_fifo_mode_set), NULL);
+-
+-			rtio_submit(rtio, 0);
++			sqes[0]->flags = RTIO_SQE_CHAINED;
++			rtio_sqe_prep_callback_no_cqe(sqes[1], lsm6dsv16x_complete_op_cb,
++						      (void *)dev, lsm6dsv16x->streaming_sqe);
++			result = rtio_submit(rtio, 0);
++			if (result != 0) {
++				lsm6dsv16x_complete_streaming_sqe(lsm6dsv16x, result);
++			}
++		} else {
++			lsm6dsv16x_complete_streaming_sqe(lsm6dsv16x, 0);
+ 		}
+ 
+ 		return;
+@@ -641,6 +653,8 @@ static void lsm6dsv16x_read_status_cb(struct rtio *r, const struct rtio_sqe *sqe
+ 		if (result != 0) {
+ 			lsm6dsv16x_complete_streaming_sqe(lsm6dsv16x, result);
+ 		}
++	} else {
++		lsm6dsv16x_complete_streaming_sqe(lsm6dsv16x, -ENODATA);
+ 	}
+ }
+ 
+@@ -651,7 +665,7 @@ static void lsm6dsv16x_read_status_cb(struct rtio *r, const struct rtio_sqe *sqe
+  *     - int_fifo_full (SENSOR_TRIG_FIFO_FULL)
+  *     - int_drdy (SENSOR_TRIG_DATA_READY)
+  */
+-void lsm6dsv16x_stream_irq_handler(const struct device *dev)
++static void lsm6dsv16x_stream_read(const struct device *dev)
+ {
+ 	struct lsm6dsv16x_data *lsm6dsv16x = dev->data;
+ #if LSM6DSVXXX_ANY_INST_ON_BUS_STATUS_OKAY(i3c)
+@@ -662,6 +676,7 @@ void lsm6dsv16x_stream_irq_handler(const struct device *dev)
+ 	int rc;
+ 
+ 	if (lsm6dsv16x->streaming_sqe == NULL) {
++		k_sem_give(&lsm6dsv16x->stream_io);
+ 		return;
+ 	}
+ 
+@@ -725,6 +740,7 @@ void lsm6dsv16x_stream_irq_handler(const struct device *dev)
+ #if LSM6DSVXXX_ANY_INST_ON_BUS_STATUS_OKAY(i3c)
+ 		}
+ #endif
++		return;
+ 	}
+ 
+ 	/* handle drdy trigger */
+@@ -749,5 +765,36 @@ void lsm6dsv16x_stream_irq_handler(const struct device *dev)
+ 		if (rc != 0) {
+ 			lsm6dsv16x_complete_streaming_sqe(lsm6dsv16x, rc);
+ 		}
++		return;
+ 	}
++	k_sem_give(&lsm6dsv16x->stream_io);
++}
++
++static void lsm6dsv16x_stream_irq_work(struct k_work *work)
++{
++	struct lsm6dsv16x_data *data = CONTAINER_OF(work, struct lsm6dsv16x_data,
++						stream_irq_work);
++
++	k_sem_take(&data->stream_io, K_FOREVER);
++	lsm6dsv16x_stream_read(data->dev);
++}
++
++void lsm6dsv16x_stream_init(const struct device *dev)
++{
++	struct lsm6dsv16x_data *data = dev->data;
++
++	k_sem_init(&data->stream_io, 1, 1);
++	k_work_init(&data->stream_irq_work, lsm6dsv16x_stream_irq_work);
++}
++
++void lsm6dsv16x_stream_irq_handler(const struct device *dev)
++{
++	struct lsm6dsv16x_data *data = dev->data;
++
++	if (k_sem_take(&data->stream_io, K_NO_WAIT) != 0) {
++		/* GPIO is already masked. Keep the request and service it after the bank change. */
++		k_work_submit(&data->stream_irq_work);
++		return;
++	}
++	lsm6dsv16x_stream_read(dev);
+ }
+diff --git a/include/zephyr/drivers/sensor/lsm6dsv16x.h b/include/zephyr/drivers/sensor/lsm6dsv16x.h
+index 2c80b3720e1..4a0f1447ef9 100644
+--- a/include/zephyr/drivers/sensor/lsm6dsv16x.h
++++ b/include/zephyr/drivers/sensor/lsm6dsv16x.h
+@@ -15,6 +15,11 @@ extern "C" {
+ /** Duration of one tick of the LSM6DSV16X hardware timestamp counter. */
+ #define LSM6DSV16X_FIFO_TIMESTAMP_TICK_US 21U
+ 
++/** LSM6DSV16X SFLP gyroscope calibration threshold, in Valve setting units (0–255). */
++enum sensor_attribute_lsm6dsv16x {
++	SENSOR_ATTR_LSM6DSV16X_GYRO_CALIBRATION_THRESHOLD = SENSOR_ATTR_PRIV_START,
++};
++
+ /** Custom sensor channels for the LSM6DSV16X. */
+ enum sensor_channel_lsm6dsv16x {
+ 	/**
+diff --git a/tests/drivers/sensor/lsm6dsv16x_stream/src/lsm6dsv16x_emul.c b/tests/drivers/sensor/lsm6dsv16x_stream/src/lsm6dsv16x_emul.c
+index 0f2e4fefe3c..cc2ae88186a 100644
+--- a/tests/drivers/sensor/lsm6dsv16x_stream/src/lsm6dsv16x_emul.c
++++ b/tests/drivers/sensor/lsm6dsv16x_stream/src/lsm6dsv16x_emul.c
+@@ -13,6 +13,9 @@
+ 
+ #define REG_FUNC_CFG_ACCESS      0x01
+ #define REG_EMB_FUNC_EXEC_STATUS 0x07
++#define REG_PAGE_ADDRESS         0x08
++#define REG_PAGE_VALUE           0x09
++#define REG_PAGE_RW              0x17
+ #define REG_WHO_AM_I             0x0f
+ #define REG_FIFO_STATUS1         0x1b
+ #define REG_STATUS               0x1e
+@@ -32,18 +35,26 @@ enum register_bank {
+ 
+ struct lsm6dsv16x_emul_data {
+ 	uint8_t registers[BANK_COUNT][UINT8_MAX + 1];
++	uint8_t page_values[UINT8_MAX + 1];
+ 	uint32_t read_count[UINT8_MAX + 1];
+ 	uint32_t write_count[UINT8_MAX + 1];
+ 	uint8_t func_cfg_access;
+ 	uint8_t address;
++	uint8_t page_address;
++	bool page_write_enabled;
+ 	enum register_bank bank;
+ 	uint8_t fail_reg;
+ 	uint8_t fail_fill;
+ 	int fail_error;
+ 	bool fail_armed;
++	uint8_t pause_reg;
++	bool pause_read;
++	bool pause_armed;
+ };
+ 
+ static struct lsm6dsv16x_emul_data emul_data;
++K_SEM_DEFINE(transfer_paused, 0, 1);
++K_SEM_DEFINE(transfer_resume, 0, 1);
+ 
+ static uint8_t emul_read_byte(struct lsm6dsv16x_emul_data *data, uint8_t reg)
+ {
+@@ -80,6 +91,15 @@ static void emul_write_byte(struct lsm6dsv16x_emul_data *data, uint8_t reg, uint
+ 		}
+ 		return;
+ 	}
++	if (data->bank == BANK_EMBEDDED) {
++		if (reg == REG_PAGE_RW) {
++			data->page_write_enabled = (value & BIT(6)) != 0U;
++		} else if (reg == REG_PAGE_ADDRESS) {
++			data->page_address = value;
++		} else if (reg == REG_PAGE_VALUE && data->page_write_enabled) {
++			data->page_values[data->page_address++] = value;
++		}
++	}
+ 
+ 	data->registers[data->bank][reg] = value;
+ }
+@@ -88,6 +108,7 @@ static int lsm6dsv16x_emul_transfer(const struct emul *target, struct i2c_msg *m
+ 				    int addr)
+ {
+ 	struct lsm6dsv16x_emul_data *data = target->data;
++	bool pause = false;
+ 
+ 	ARG_UNUSED(addr);
+ 
+@@ -100,6 +121,11 @@ static int lsm6dsv16x_emul_transfer(const struct emul *target, struct i2c_msg *m
+ 			}
+ 
+ 			data->address = msg->buf[0];
++			if (data->pause_armed && !data->pause_read && msg->len > 1 &&
++			    data->pause_reg == data->address) {
++				pause = true;
++				data->pause_armed = false;
++			}
+ 			data->write_count[data->address]++;
+ 			for (uint32_t j = 1; j < msg->len; j++) {
+ 				emul_write_byte(data, data->address++, msg->buf[j]);
+@@ -109,6 +135,10 @@ static int lsm6dsv16x_emul_transfer(const struct emul *target, struct i2c_msg *m
+ 
+ 		const uint8_t start_reg = data->address;
+ 
++		if (data->pause_armed && data->pause_read && data->pause_reg == start_reg) {
++			pause = true;
++			data->pause_armed = false;
++		}
+ 		data->read_count[start_reg]++;
+ 		if (data->fail_armed && data->fail_reg == start_reg) {
+ 			memset(msg->buf, data->fail_fill, msg->len);
+@@ -121,6 +151,11 @@ static int lsm6dsv16x_emul_transfer(const struct emul *target, struct i2c_msg *m
+ 		}
+ 	}
+ 
++	/* Model a scheduling gap between bus transactions, with bounded failure recovery. */
++	if (pause) {
++		k_sem_give(&transfer_paused);
++		return k_sem_take(&transfer_resume, K_SECONDS(2));
++	}
+ 	return 0;
+ }
+ 
+@@ -184,3 +219,32 @@ uint8_t lsm6dsv16x_emul_register_get(uint8_t reg)
+ {
+ 	return emul_data.registers[BANK_MAIN][reg];
+ }
++
++uint8_t lsm6dsv16x_emul_page_get(uint8_t addr)
++{
++	return emul_data.page_values[addr];
++}
++
++void lsm6dsv16x_emul_page_set(uint8_t addr, uint8_t value)
++{
++	emul_data.page_values[addr] = value;
++}
++
++void lsm6dsv16x_emul_pause_next_transfer(uint8_t reg, bool read)
++{
++	k_sem_reset(&transfer_paused);
++	k_sem_reset(&transfer_resume);
++	emul_data.pause_reg = reg;
++	emul_data.pause_read = read;
++	emul_data.pause_armed = true;
++}
++
++int lsm6dsv16x_emul_wait_paused(k_timeout_t timeout)
++{
++	return k_sem_take(&transfer_paused, timeout);
++}
++
++void lsm6dsv16x_emul_resume(void)
++{
++	k_sem_give(&transfer_resume);
++}
+diff --git a/tests/drivers/sensor/lsm6dsv16x_stream/src/lsm6dsv16x_emul.h b/tests/drivers/sensor/lsm6dsv16x_stream/src/lsm6dsv16x_emul.h
+index b7910600b3c..d8d76782349 100644
+--- a/tests/drivers/sensor/lsm6dsv16x_stream/src/lsm6dsv16x_emul.h
++++ b/tests/drivers/sensor/lsm6dsv16x_stream/src/lsm6dsv16x_emul.h
+@@ -1,8 +1,10 @@
+ #ifndef ZEPHYR_TESTS_DRIVERS_SENSOR_LSM6DSV16X_STREAM_EMUL_H_
+ #define ZEPHYR_TESTS_DRIVERS_SENSOR_LSM6DSV16X_STREAM_EMUL_H_
+ 
++#include <stdbool.h>
+ #include <stddef.h>
+ #include <stdint.h>
++#include <zephyr/kernel.h>
+ 
+ void lsm6dsv16x_emul_set_fifo(const uint8_t payload[7]);
+ void lsm6dsv16x_emul_set_fifo_empty(void);
+@@ -12,5 +14,10 @@ uint32_t lsm6dsv16x_emul_read_count(uint8_t reg);
+ void lsm6dsv16x_emul_clear_write_counts(void);
+ uint32_t lsm6dsv16x_emul_write_count(uint8_t reg);
+ uint8_t lsm6dsv16x_emul_register_get(uint8_t reg);
++uint8_t lsm6dsv16x_emul_page_get(uint8_t addr);
++void lsm6dsv16x_emul_page_set(uint8_t addr, uint8_t value);
++void lsm6dsv16x_emul_pause_next_transfer(uint8_t reg, bool read);
++int lsm6dsv16x_emul_wait_paused(k_timeout_t timeout);
++void lsm6dsv16x_emul_resume(void);
+ 
+ #endif /* ZEPHYR_TESTS_DRIVERS_SENSOR_LSM6DSV16X_STREAM_EMUL_H_ */
+diff --git a/tests/drivers/sensor/lsm6dsv16x_stream/src/main.c b/tests/drivers/sensor/lsm6dsv16x_stream/src/main.c
+index d3aa1620143..c17c161d148 100644
+--- a/tests/drivers/sensor/lsm6dsv16x_stream/src/main.c
++++ b/tests/drivers/sensor/lsm6dsv16x_stream/src/main.c
+@@ -15,11 +15,13 @@
+ #include "lsm6dsv16x.h"
+ #include "lsm6dsv16x_decoder.h"
+ 
+-#define SENSOR_NODE           DT_NODELABEL(lsm6dsv16x)
+-#define REG_FIFO_CTRL4        0x0a
+-#define REG_FIFO_STATUS1      0x1b
+-#define REG_FUNCTIONS_ENABLE  0x50
+-#define REG_FIFO_DATA_OUT_TAG 0x78
++#define SENSOR_NODE              DT_NODELABEL(lsm6dsv16x)
++#define REG_FUNC_CFG_ACCESS      0x01
++#define REG_EMB_FUNC_EXEC_STATUS 0x07
++#define REG_FIFO_CTRL4           0x0a
++#define REG_FIFO_STATUS1         0x1b
++#define REG_FUNCTIONS_ENABLE     0x50
++#define REG_FIFO_DATA_OUT_TAG    0x78
+ 
+ #define FIFO_TIMESTAMP_DECIMATION_MASK GENMASK(7, 6)
+ #define FIFO_TIMESTAMP_DECIMATE_1      BIT(6)
+@@ -36,8 +38,31 @@ static const uint8_t fifo_timestamp_payload[7] = {
+ 	0x20, 0x78, 0x56, 0x34, 0x12, 0x00, 0x00,
+ };
+ 
++ZTEST(lsm6dsv16x_stream, test_gyro_calibration_threshold_programs_embedded_page)
++{
++	struct sensor_value threshold = { .val1 = 100 };
++
++	zassert_ok(sensor_attr_set(sensor, SENSOR_CHAN_GYRO_XYZ,
++	                           SENSOR_ATTR_LSM6DSV16X_GYRO_CALIBRATION_THRESHOLD, &threshold));
++	zassert_equal(0x40, lsm6dsv16x_emul_page_get(0x98));
++	zassert_equal(0x19, lsm6dsv16x_emul_page_get(0x99));
++
++	threshold.val1 = 0;
++	zassert_ok(sensor_attr_set(sensor, SENSOR_CHAN_GYRO_XYZ,
++	                           SENSOR_ATTR_LSM6DSV16X_GYRO_CALIBRATION_THRESHOLD, &threshold));
++	zassert_equal(0, lsm6dsv16x_emul_page_get(0x98));
++	zassert_equal(0, lsm6dsv16x_emul_page_get(0x99));
++
++	threshold.val1 = 256;
++	zassert_equal(-EINVAL, sensor_attr_set(sensor, SENSOR_CHAN_GYRO_XYZ,
++	                                        SENSOR_ATTR_LSM6DSV16X_GYRO_CALIBRATION_THRESHOLD,
++	                                        &threshold));
++}
++
+ SENSOR_DT_STREAM_IODEV(stream_iodev, SENSOR_NODE,
+ 		       {SENSOR_TRIG_FIFO_WATERMARK, SENSOR_STREAM_DATA_INCLUDE});
++SENSOR_DT_STREAM_IODEV(drop_stream_iodev, SENSOR_NODE,
++		       {SENSOR_TRIG_FIFO_WATERMARK, SENSOR_STREAM_DATA_DROP});
+ SENSOR_DT_STREAM_IODEV(mixed_stream_iodev, SENSOR_NODE,
+ 		       {SENSOR_TRIG_FIFO_WATERMARK, SENSOR_STREAM_DATA_INCLUDE},
+ 		       {SENSOR_TRIG_DATA_READY, SENSOR_STREAM_DATA_INCLUDE});
+@@ -147,6 +172,133 @@ static void prepare_attempt(void)
+ 	lsm6dsv16x_emul_clear_read_counts();
+ }
+ 
++K_THREAD_STACK_DEFINE(threshold_stack, 2048);
++static struct k_thread threshold_thread;
++static int threshold_result;
++K_SEM_DEFINE(threshold_started, 0, 1);
++K_SEM_DEFINE(threshold_done, 0, 1);
++
++static void set_threshold(void *arg1, void *arg2, void *arg3)
++{
++	struct sensor_value threshold = { .val1 = 50 };
++
++	ARG_UNUSED(arg1);
++	ARG_UNUSED(arg2);
++	ARG_UNUSED(arg3);
++	k_sem_give(&threshold_started);
++	threshold_result = sensor_attr_set(sensor, SENSOR_CHAN_GYRO_XYZ,
++					  SENSOR_ATTR_LSM6DSV16X_GYRO_CALIBRATION_THRESHOLD,
++					  &threshold);
++	k_sem_give(&threshold_done);
++}
++
++static void start_threshold_update(void)
++{
++	k_sem_reset(&threshold_started);
++	k_sem_reset(&threshold_done);
++	k_thread_create(&threshold_thread, threshold_stack, K_THREAD_STACK_SIZEOF(threshold_stack),
++			set_threshold, NULL, NULL, NULL, K_PRIO_PREEMPT(8), 0, K_NO_WAIT);
++	zassert_ok(k_sem_take(&threshold_started, K_SECONDS(1)));
++}
++
++static void finish_threshold_update(void)
++{
++	zassert_ok(k_thread_join(&threshold_thread, K_SECONDS(2)));
++	zassert_ok(threshold_result);
++	zassert_equal(0x40, lsm6dsv16x_emul_page_get(0x98));
++	zassert_equal(0x15, lsm6dsv16x_emul_page_get(0x99));
++}
++
++ZTEST(lsm6dsv16x_stream, test_threshold_defers_fifo_interrupt_until_main_bank_restored)
++{
++	struct rtio_sqe *handle = start_stream();
++	uint32_t buf_len;
++
++	prepare_attempt();
++	lsm6dsv16x_emul_pause_next_transfer(REG_FUNC_CFG_ACCESS, false);
++	start_threshold_update();
++	zassert_ok(lsm6dsv16x_emul_wait_paused(K_SECONDS(1)));
++	pulse_interrupt();
++	expect_no_completion();
++	zassert_equal(0, lsm6dsv16x_emul_read_count(REG_FIFO_STATUS1));
++	lsm6dsv16x_emul_resume();
++	finish_threshold_update();
++
++	uint8_t *buf = expect_success(&buf_len);
++
++	rtio_release_buffer(&stream_ctx, buf, buf_len);
++	stop_stream(handle);
++}
++
++ZTEST(lsm6dsv16x_stream, test_threshold_waits_for_inflight_fifo_read)
++{
++	struct rtio_sqe *handle = start_stream();
++	uint32_t buf_len;
++
++	prepare_attempt();
++	lsm6dsv16x_emul_pause_next_transfer(REG_FIFO_STATUS1, true);
++	pulse_interrupt();
++	zassert_ok(lsm6dsv16x_emul_wait_paused(K_SECONDS(1)));
++	lsm6dsv16x_emul_clear_write_counts();
++	start_threshold_update();
++	zassert_not_equal(0, k_sem_take(&threshold_done, K_MSEC(20)));
++	zassert_equal(0, lsm6dsv16x_emul_write_count(REG_FUNC_CFG_ACCESS));
++	lsm6dsv16x_emul_resume();
++
++	uint8_t *buf = expect_success(&buf_len);
++
++	rtio_release_buffer(&stream_ctx, buf, buf_len);
++	finish_threshold_update();
++	stop_stream(handle);
++}
++
++ZTEST(lsm6dsv16x_stream, test_threshold_waits_for_fifo_drop_write)
++{
++	struct rtio_sqe *handle = start_stream_iodev(&drop_stream_iodev);
++	uint32_t buf_len;
++	uint8_t *buf;
++
++	prepare_attempt();
++	lsm6dsv16x_emul_pause_next_transfer(REG_FIFO_CTRL4, false);
++	pulse_interrupt();
++	zassert_ok(lsm6dsv16x_emul_wait_paused(K_SECONDS(1)));
++	lsm6dsv16x_emul_clear_write_counts();
++	start_threshold_update();
++	zassert_not_equal(0, k_sem_take(&threshold_done, K_MSEC(20)));
++	zassert_equal(0, lsm6dsv16x_emul_write_count(REG_FUNC_CFG_ACCESS));
++	lsm6dsv16x_emul_resume();
++
++	struct rtio_cqe cqe = get_completion();
++
++	zassert_ok(cqe.result);
++	zassert_ok(rtio_cqe_get_mempool_buffer(&stream_ctx, &cqe, &buf, &buf_len));
++	zassert_equal(0, ((struct lsm6dsv16x_fifo_data *)buf)->fifo_count);
++	rtio_release_buffer(&stream_ctx, buf, buf_len);
++	finish_threshold_update();
++	stop_stream(handle);
++}
++
++ZTEST(lsm6dsv16x_stream, test_threshold_error_releases_io_and_keeps_stream_usable)
++{
++	const uint8_t failing_regs[] = { REG_FUNC_CFG_ACCESS, REG_EMB_FUNC_EXEC_STATUS };
++	struct sensor_value threshold = { .val1 = 50 };
++	struct rtio_sqe *handle = start_stream();
++	uint32_t buf_len;
++
++	for (size_t i = 0; i < ARRAY_SIZE(failing_regs); ++i) {
++		lsm6dsv16x_emul_fail_next_read(failing_regs[i], -EIO, 0);
++		zassert_equal(-EIO, sensor_attr_set(sensor, SENSOR_CHAN_GYRO_XYZ,
++					   SENSOR_ATTR_LSM6DSV16X_GYRO_CALIBRATION_THRESHOLD,
++					   &threshold));
++		prepare_attempt();
++		pulse_interrupt();
++		uint8_t *buf = expect_success(&buf_len);
++
++		rtio_release_buffer(&stream_ctx, buf, buf_len);
++	}
++	stop_stream(handle);
++}
++
+ ZTEST(lsm6dsv16x_stream, test_fifo_status_read_failure_recovers)
+ {
+ 	start_stream();
