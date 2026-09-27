@@ -47,6 +47,8 @@ static const struct device *const imu_dev = DEVICE_DT_GET(DT_ALIAS(accel0));
 #define IMU_MODE_PATH "settings/sensors/imu/mode"
 #define IMU_MOUNTING_MATRIX_PATH "settings/sensors/imu/mounting_matrix"
 #define IMU_GYRO_DZ_THRESHOLD_PATH "settings/sensors/imu/gyro_dz_threshold"
+#define IMU_USE_BIAS_PATH "settings/sensors/imu/use_bias"
+#define IMU_GYRO_THRESHOLD_PATH "settings/sensors/imu/gyro_threshold"
 #define IMU_GYRO_BIAS_PATH "cal/sensors/gyroscope/bias"
 
 static int8_t mounting_matrix[9] = {
@@ -64,6 +66,12 @@ static uint16_t imu_mode;
 static int32_t gyro_dz_threshold;
 static int32_t staged_gyro_dz_threshold;
 static bool gyro_dz_threshold_dirty;
+static bool use_gyro_bias = true;
+static uint8_t gyro_threshold = 100;
+static uint8_t staged_use_gyro_bias = 1;
+static uint8_t staged_gyro_threshold = 100;
+static bool use_gyro_bias_dirty;
+static bool gyro_threshold_dirty;
 
 static float gyro_bias[3];
 static float staged_gyro_bias[3];
@@ -339,6 +347,31 @@ static int program_gyro_bias(void)
 #endif
 }
 
+static int program_gyro_threshold(void)
+{
+#if IMU_HAS_DEVICE
+	struct sensor_value threshold = { 0 };
+	int err;
+
+	if(!device_is_ready(imu_dev))
+	{
+		return 0;
+	}
+
+	k_mutex_lock(&imu_bias_program_lock, K_FOREVER);
+	k_mutex_lock(&imu_io_lock, K_FOREVER);
+	threshold.val1 = gyro_threshold;
+	/* The driver serializes this update with FIFO I/O without resetting SFLP. */
+	err = sensor_attr_set(imu_dev, SENSOR_CHAN_GYRO_XYZ,
+	                      SENSOR_ATTR_LSM6DSV16X_GYRO_CALIBRATION_THRESHOLD, &threshold);
+	k_mutex_unlock(&imu_io_lock);
+	k_mutex_unlock(&imu_bias_program_lock);
+	return err;
+#else
+	return 0;
+#endif
+}
+
 static void set_motion_trigger_enabled(bool enabled)
 {
 #if IMU_HAS_DEVICE
@@ -358,6 +391,7 @@ void imu_reset(void)
 	k_mutex_lock(&imu_io_lock, K_FOREVER);
 	last_sflp_bias_update_us = 0;
 	k_mutex_unlock(&imu_io_lock);
+	(void)program_gyro_threshold();
 	(void)program_gyro_bias();
 }
 
@@ -384,12 +418,29 @@ static void apply_mode(uint16_t mode)
 
 static void setting_changed(uint8_t id, int16_t value)
 {
-	if(id != IBEX_SETTING_IMU_MODE)
+	if(id == IBEX_SETTING_IMU_MODE)
 	{
-		return;
+		apply_mode((uint16_t)value);
 	}
+	else if(id == IBEX_SETTING_IMU_USE_BIAS)
+	{
+		k_mutex_lock(&imu_io_lock, K_FOREVER);
+		use_gyro_bias = value != 0;
+		k_mutex_unlock(&imu_io_lock);
+	}
+	else if(id == IBEX_SETTING_IMU_GYRO_THRESHOLD)
+	{
+		int err;
 
-	apply_mode((uint16_t)value);
+		k_mutex_lock(&imu_io_lock, K_FOREVER);
+		gyro_threshold = (uint8_t)value;
+		k_mutex_unlock(&imu_io_lock);
+		err = program_gyro_threshold();
+		if(err)
+		{
+			LOG_WRN("failed to program gyro calibration threshold: %d", err);
+		}
+	}
 }
 
 static int load_exact_cb(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg,
@@ -441,6 +492,8 @@ static void load_persisted_settings(void)
 {
 	int16_t loaded_mode;
 	int32_t loaded_threshold;
+	uint8_t loaded_use_bias;
+	uint8_t loaded_gyro_threshold;
 	float loaded_bias[3];
 	int8_t loaded_matrix[9];
 
@@ -451,6 +504,15 @@ static void load_persisted_settings(void)
 	if(load_setting_exact(IMU_GYRO_DZ_THRESHOLD_PATH, &loaded_threshold, sizeof(loaded_threshold)))
 	{
 		gyro_dz_threshold = loaded_threshold;
+	}
+	if(load_setting_exact(IMU_USE_BIAS_PATH, &loaded_use_bias, sizeof(loaded_use_bias)))
+	{
+		(void)ibex_setting_set(IBEX_SETTING_IMU_USE_BIAS, loaded_use_bias);
+	}
+	if(load_setting_exact(IMU_GYRO_THRESHOLD_PATH, &loaded_gyro_threshold,
+	                      sizeof(loaded_gyro_threshold)))
+	{
+		(void)ibex_setting_set(IBEX_SETTING_IMU_GYRO_THRESHOLD, loaded_gyro_threshold);
 	}
 	if(load_setting_exact(IMU_GYRO_BIAS_PATH, loaded_bias, sizeof(loaded_bias)))
 	{
@@ -475,6 +537,14 @@ static void load_persisted_settings(void)
 
 	memcpy(staged_mounting_matrix, mounting_matrix, sizeof(staged_mounting_matrix));
 	staged_gyro_dz_threshold = gyro_dz_threshold;
+	{
+		int16_t value;
+
+		(void)ibex_setting_get(IBEX_SETTING_IMU_USE_BIAS, &value);
+		staged_use_gyro_bias = (uint8_t)value;
+		(void)ibex_setting_get(IBEX_SETTING_IMU_GYRO_THRESHOLD, &value);
+		staged_gyro_threshold = (uint8_t)value;
+	}
 	memcpy(staged_gyro_bias, gyro_bias, sizeof(staged_gyro_bias));
 }
 
@@ -682,6 +752,10 @@ static int build_imu_report_from_stream(const uint8_t *buf)
 	if(err == 0)
 	{
 		memcpy(bias, latest_sflp_bias_valid ? latest_sflp_bias : gyro_bias, sizeof(bias));
+		if(!use_gyro_bias)
+		{
+			memset(bias, 0, sizeof(bias));
+		}
 		oriented[0] = gyro_axis_to_report(gyro[0] - bias[0]);
 		oriented[1] = gyro_axis_to_report(gyro[1] - bias[1]);
 		oriented[2] = gyro_axis_to_report(gyro[2] - bias[2]);
@@ -909,6 +983,20 @@ int imu_calibrate_gyro(void)
 
 bool imu_settings_read(const char *path, uint8_t *buf, size_t capacity, size_t *len)
 {
+	if(strcmp(path, IMU_USE_BIAS_PATH) == 0 || strcmp(path, IMU_GYRO_THRESHOLD_PATH) == 0)
+	{
+		uint8_t id = strcmp(path, IMU_USE_BIAS_PATH) == 0 ? IBEX_SETTING_IMU_USE_BIAS
+		                                                   : IBEX_SETTING_IMU_GYRO_THRESHOLD;
+		int16_t value;
+
+		if(capacity < 1 || !ibex_setting_get(id, &value))
+		{
+			return false;
+		}
+		buf[0] = (uint8_t)value;
+		*len = 1;
+		return true;
+	}
 	if(strcmp(path, IMU_MOUNTING_MATRIX_PATH) == 0)
 	{
 		if(capacity < sizeof(mounting_matrix))
@@ -953,6 +1041,36 @@ int imu_settings_stage(const char *path, const uint8_t *value, size_t len)
 {
 	float received_bias[3];
 	int err;
+
+	if(strcmp(path, IMU_USE_BIAS_PATH) == 0 || strcmp(path, IMU_GYRO_THRESHOLD_PATH) == 0)
+	{
+		uint8_t id = strcmp(path, IMU_USE_BIAS_PATH) == 0 ? IBEX_SETTING_IMU_USE_BIAS
+		                                                   : IBEX_SETTING_IMU_GYRO_THRESHOLD;
+		int16_t normalized;
+
+		if(len != 1)
+		{
+			return -EINVAL;
+		}
+		k_mutex_lock(&imu_settings_mutex, K_FOREVER);
+		err = ibex_setting_set(id, value[0]);
+		if(!err)
+		{
+			(void)ibex_setting_get(id, &normalized);
+			if(id == IBEX_SETTING_IMU_USE_BIAS)
+			{
+				staged_use_gyro_bias = (uint8_t)normalized;
+				use_gyro_bias_dirty = true;
+			}
+			else
+			{
+				staged_gyro_threshold = (uint8_t)normalized;
+				gyro_threshold_dirty = true;
+			}
+		}
+		k_mutex_unlock(&imu_settings_mutex);
+		return err;
+	}
 
 	if(strcmp(path, IMU_MOUNTING_MATRIX_PATH) == 0)
 	{
@@ -1043,6 +1161,16 @@ static int commit_setting_if_dirty(const char *path, const void *value, size_t l
 
 int imu_settings_commit(const char *path)
 {
+	if(strcmp(path, IMU_USE_BIAS_PATH) == 0)
+	{
+		return commit_setting_if_dirty(path, &staged_use_gyro_bias,
+		                               sizeof(staged_use_gyro_bias), &use_gyro_bias_dirty);
+	}
+	if(strcmp(path, IMU_GYRO_THRESHOLD_PATH) == 0)
+	{
+		return commit_setting_if_dirty(path, &staged_gyro_threshold,
+		                               sizeof(staged_gyro_threshold), &gyro_threshold_dirty);
+	}
 	if(strcmp(path, IMU_MOUNTING_MATRIX_PATH) == 0)
 	{
 		return commit_setting_if_dirty(path, staged_mounting_matrix, sizeof(staged_mounting_matrix),

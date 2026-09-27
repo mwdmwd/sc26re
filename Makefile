@@ -124,7 +124,7 @@ app-format-check:
 	$(CLANG_FORMAT) --dry-run -Werror $(APP_FORMAT_SOURCES)
 
 .PHONY: test
-test: test-valve-nvs test-haptics-stereo test-hosttools
+test: test-valve-nvs test-haptics-stereo test-imu-threshold test-hosttools
 
 .PHONY: test-hosttools
 test-hosttools:
@@ -148,6 +148,12 @@ test-haptics-stereo: zephyr-workspace
 	cd "$(ZEPHYR_WORKSPACE)" && $(ZEPHYR_BUILD_ENV) $(WEST) build -p "$(ZEPHYR_PRISTINE)" \
 		-b native_sim "$(ZEPHYR_APP)/tests/haptics_stereo" -d build-test-haptics-stereo
 	"$(ZEPHYR_WORKSPACE)/build-test-haptics-stereo/zephyr/zephyr.exe"
+
+.PHONY: test-imu-threshold
+test-imu-threshold: zephyr-workspace
+	cd "$(ZEPHYR_WORKSPACE)" && $(ZEPHYR_BUILD_ENV) $(WEST) build -p "$(ZEPHYR_PRISTINE)" \
+		-b native_sim "$(ZEPHYR_APP)/tests/imu_threshold" -d build-test-imu-threshold
+	"$(ZEPHYR_WORKSPACE)/build-test-imu-threshold/zephyr/zephyr.exe"
 
 .PHONY: bootstub
 bootstub: $(BOOTSTUB_BUILD_DIR)/ibex-microbit.hex $(BOOTSTUB_BUILD_DIR)/ibex-microbit.bin

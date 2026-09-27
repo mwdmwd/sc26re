@@ -127,6 +127,9 @@ static const struct ibex_setting_entry setting_entries[IBEX_SETTING_COUNT] = {
 	[80] = SETTING_ENTRY(1, 0, 2, "stabilizer_enabled", NULL),
 	[81] = SETTING_ENTRY(0, 0, 1, "timp_mode_mte", NULL),
 	[82] = OFW_SETTING_ENTRY(3, 0, 3, "olympus_click_suppress_mask", NULL),
+	[83] = UNKNOWN_SETTING_ENTRY(1, 0, 1, "unknown_83", NULL),
+	[84] = OFW_SETTING_ENTRY(1, 0, 1, "imu_use_bias", NULL),
+	[85] = OFW_SETTING_ENTRY(100, 0, 200, "imu_gyro_threshold", NULL),
 };
 
 static int16_t setting_values[IBEX_SETTING_COUNT];
@@ -315,7 +318,21 @@ int ibex_setting_set(uint8_t id, int16_t value)
 		return -EINVAL;
 	}
 
-	clamped = CLAMP(value, setting_entries[id].min_value, setting_entries[id].max_value);
+	/* OFW normalizes ID 84 to a boolean and sends the low byte of ID 85 to the IMU,
+	 * even when ID 85 exceeds its reported maximum of 200.
+	 */
+	if(id == IBEX_SETTING_IMU_USE_BIAS)
+	{
+		clamped = value != 0;
+	}
+	else if(id == IBEX_SETTING_IMU_GYRO_THRESHOLD)
+	{
+		clamped = (uint8_t)value;
+	}
+	else
+	{
+		clamped = CLAMP(value, setting_entries[id].min_value, setting_entries[id].max_value);
+	}
 	k_mutex_lock(&registry_mutex, K_FOREVER);
 	if(setting_values[id] != clamped)
 	{

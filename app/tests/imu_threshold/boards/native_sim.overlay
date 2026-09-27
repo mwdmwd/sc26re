@@ -1,0 +1,29 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/sensor/lsm6dsvxxx.h>
+
+/ {
+	aliases {
+		accel0 = &lsm6dsv16x;
+	};
+};
+
+&i2c0 {
+	status = "okay";
+
+	lsm6dsv16x: lsm6dsv16x@6a {
+		compatible = "st,lsm6dsv16x";
+		reg = <0x6a>;
+		int1-gpios = <&gpio0 1 GPIO_ACTIVE_HIGH>;
+		drdy-pin = <1>;
+		accel-odr = <LSM6DSVXXX_DT_ODR_AT_120Hz>;
+		gyro-odr = <LSM6DSVXXX_DT_ODR_AT_120Hz>;
+		fifo-watermark = <1>;
+		accel-fifo-batch-rate = <LSM6DSVXXX_DT_XL_BATCHED_AT_120Hz>;
+		gyro-fifo-batch-rate = <LSM6DSVXXX_DT_GY_BATCHED_AT_120Hz>;
+		sflp-odr = <LSM6DSVXXX_DT_SFLP_ODR_AT_120Hz>;
+		sflp-fifo-enable = <(LSM6DSVXXX_DT_SFLP_FIFO_GAME_ROTATION
+				    | LSM6DSVXXX_DT_SFLP_FIFO_GBIAS)>;
+	};
+};
