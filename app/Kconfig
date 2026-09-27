@@ -17,7 +17,7 @@ config IBEX_FIRMWARE_IDENTITY
 	default "SC26re"
 	help
 	  Human-readable identity embedded in the application and shown by the
-	  steamctl status shell command.
+	  status shell command.
 
 config GPIO_GREENPAK
 	bool "Valve GreenPAK input GPIO driver"

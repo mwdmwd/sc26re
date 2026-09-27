@@ -304,7 +304,7 @@ static int cmd_radio_usb_debug(const struct shell *shell, size_t argc, char **ar
 	}
 	else
 	{
-		shell_error(shell, "usage: steamctl radio usb_debug <on|off>");
+		shell_error(shell, "usage: radio usb_debug <on|off>");
 		return -EINVAL;
 	}
 
@@ -793,18 +793,15 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_olympus,
                                SHELL_SUBCMD_SET_END);
 #endif
 
-SHELL_STATIC_SUBCMD_SET_CREATE(
-    sub_steamctl, SHELL_CMD(battery, &sub_battery, "Battery and charger commands", NULL),
-    SHELL_CMD(haptics, &sub_haptics, "Haptics debug commands", NULL),
+SHELL_CMD_REGISTER(battery, &sub_battery, "Battery and charger commands", NULL);
+SHELL_CMD_REGISTER(haptics, &sub_haptics, "Haptics debug commands", NULL);
 #if CONFIG_IBEX_RGBW_LED
-    SHELL_CMD(led, &sub_led, "RGBW LED commands", NULL),
+SHELL_CMD_REGISTER(led, &sub_led, "RGBW LED commands", NULL);
 #endif
 #if CONFIG_IBEX_OLYMPUS
-    SHELL_CMD(olympus, &sub_olympus, "Olympus touchpad debug commands", NULL),
+SHELL_CMD_REGISTER(olympus, &sub_olympus, "Olympus touchpad debug commands", NULL);
 #endif
-    SHELL_CMD(power, &sub_power, "Power and reboot commands", NULL),
-    SHELL_CMD(radio, &sub_radio, "Radio personality commands", NULL),
-    SHELL_CMD(settings, &sub_settings, "Ibex runtime settings registry", NULL),
-    SHELL_CMD(status, NULL, "Show firmware status", cmd_status), SHELL_SUBCMD_SET_END);
-
-SHELL_CMD_REGISTER(steamctl, &sub_steamctl, "SC26re commands", NULL);
+SHELL_CMD_REGISTER(power, &sub_power, "Power and reboot commands", NULL);
+SHELL_CMD_REGISTER(radio, &sub_radio, "Radio personality commands", NULL);
+SHELL_CMD_REGISTER(settings, &sub_settings, "Ibex runtime settings registry", NULL);
+SHELL_CMD_REGISTER(status, NULL, "Show firmware status", cmd_status);

@@ -126,7 +126,7 @@ For an initial flash from the USB HID runtime, the helper can request ISP mode a
 make app-ibex-flash IBEX_SERIAL=<controller serial>
 ```
 
-Subsequent updates from the custom firmware can use the HID feature channel, or the `steamctl power reboot_isp` shell command, to return to the bootloader.
+Subsequent updates from the custom firmware can use the HID feature channel, or the `power reboot_isp` shell command, to return to the bootloader.
 
 ## Safety, warranty, etc.
 

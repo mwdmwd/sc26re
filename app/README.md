@@ -98,7 +98,7 @@ Once the custom firmware is running, the Ibex USB runtime exposes a composite de
 To return to ISP mode from CFW, either use the HID helper path or run:
 
 ```text
-steamctl power reboot_isp
+power reboot_isp
 ```
 
 from the shell.
@@ -151,12 +151,12 @@ The `steamctl` shell is available over:
 Useful commands:
 
 ```text
-steamctl status
-steamctl power reboot
-steamctl power reboot_isp
-steamctl radio ble
-steamctl radio esb
-steamctl radio esb_bond <proteus_uuid> <ibex_uuid> [serial]
+status
+power reboot
+power reboot_isp
+radio ble
+radio esb
+radio esb_bond <slot:0|1> <proteus_uuid> <ibex_uuid> [serial]
 ```
 
 `reboot_isp` is Ibex-only. It writes the flag words used by Valve's ISP reboot path and then performs a reboot.
@@ -165,7 +165,7 @@ steamctl radio esb_bond <proteus_uuid> <ibex_uuid> [serial]
 
 The firmware includes BLE, ESB, and USB support. Bluetooth uses Zephyr's Host and Free `BT_LL_SW_SPLIT` controller. ESB uses a direct nRF RADIO backend. The build does not include NCS, MPSL, the SoftDevice Controller, nrfxlib, or any nonfree Nordic libraries.
 
-BLE and ESB share the radio, so only one radio personality runs per boot. Use the `steamctl radio` commands or the boot chords to select one, changing the radio personality reboots the controller. If coexistence is needed in the future, it will be added without MPSL, how hard could it be?
+BLE and ESB share the radio, so only one radio personality runs per boot. Use the `radio` commands or the boot chords to select one, changing the radio personality reboots the controller. If coexistence is needed in the future, it will be added without MPSL, how hard could it be?
 
 BLE reconnects are restricted to bonded hosts. To pair a new host, hold A+B while powering on in BLE mode. This opens a 30-second pairing window. From another saved personality, hold RB+A+B while powering on to select BLE and open enrollment in one step. Without the physical boot chord, the controller does not start connectable advertising, not even if it is not bonded to any host.
 
@@ -182,9 +182,9 @@ The Ibex haptics master volume can be inspected or changed at runtime from the s
 to both the primary touchpad actuators and secondary PCM streaming channels:
 
 ```text
-steamctl haptics volume
-steamctl haptics volume -24
-steamctl haptics click primary
+haptics volume
+haptics volume -24
+haptics click primary
 ```
 
 The gain range is -24 dB through +6 dB, with -3 dB as the reset default. The setting is also
