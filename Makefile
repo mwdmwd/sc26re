@@ -3,18 +3,27 @@ SC26RE_MAIN_INCLUDED := 1
 
 # Zephyr SDK / build options
 WEST ?= west
+CMAKE ?= cmake
 ZEPHYR_WORKSPACE ?= $(CURDIR)/zephyr
 ZEPHYR_SDK_VERSION ?= 1.0.1
-ZEPHYR_SDK_DIR ?= $(CURDIR)/sdk/zephyr-sdk-$(ZEPHYR_SDK_VERSION)
+# Keep the download destination separate from the SDK selected for builds.
+# ZEPHYR_SDK_DIR takes precedence over Zephyr's standard environment variable.
+ZEPHYR_SDK_LOCAL_DIR := $(CURDIR)/sdk/zephyr-sdk-$(ZEPHYR_SDK_VERSION)
+ZEPHYR_SDK_REQUESTED_DIR := $(or $(ZEPHYR_SDK_DIR),$(ZEPHYR_SDK_INSTALL_DIR))
+ZEPHYR_SDK_PROBE := $(CMAKE) "-DSDK_ROOT=$(ZEPHYR_SDK_REQUESTED_DIR)" -P "$(CURDIR)/scripts/zephyr-sdk.cmake"
+# Defer discovery so help, formatting, and host tools don't require CMake.
+ZEPHYR_SDK_DISCOVERED_DIR = $(shell $(ZEPHYR_SDK_PROBE))
+ZEPHYR_SDK_SELECTED_DIR = $(or $(ZEPHYR_SDK_DISCOVERED_DIR),$(abspath $(or $(ZEPHYR_SDK_REQUESTED_DIR),$(ZEPHYR_SDK_LOCAL_DIR))))
+ZEPHYR_SDK_DIR ?= $(ZEPHYR_SDK_SELECTED_DIR)
 ZEPHYR_SDK_DOWNLOAD_DIR ?= $(CURDIR)/sdk/downloads
 ZEPHYR_SDK_RELEASE_URL ?= https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v$(ZEPHYR_SDK_VERSION)
 ZEPHYR_SDK_MINIMAL_ARCHIVE := zephyr-sdk-$(ZEPHYR_SDK_VERSION)_linux-x86_64_minimal.tar.xz
 ZEPHYR_SDK_ARM_ARCHIVE := toolchain_gnu_linux-x86_64_arm-zephyr-eabi.tar.xz
 ZEPHYR_SDK_MINIMAL_SHA256 := ca9bc0ff66fafca1dac9d592a36d953cf16d096a9d09b1c0357f021cf9f6a7eb
 ZEPHYR_SDK_ARM_SHA256 := 21b85981cb5a1818d9bc53d82af80f208946ec038b982ff1907287572ed3a634
-ZEPHYR_SDK_STAMP := $(ZEPHYR_SDK_DIR)/.arm-toolchain-installed
-ZEPHYR_SDK_CMAKE_CONFIG := $(ZEPHYR_SDK_DIR)/cmake/Zephyr-sdkConfig.cmake
-ZEPHYR_SDK_GNU_DIR := $(ZEPHYR_SDK_DIR)/gnu
+ZEPHYR_SDK_STAMP := $(ZEPHYR_SDK_LOCAL_DIR)/.arm-toolchain-installed
+ZEPHYR_SDK_CMAKE_CONFIG := $(ZEPHYR_SDK_LOCAL_DIR)/cmake/Zephyr-sdkConfig.cmake
+ZEPHYR_SDK_GNU_DIR := $(ZEPHYR_SDK_LOCAL_DIR)/gnu
 ZEPHYR_SDK_ARM_GCC := $(ZEPHYR_SDK_GNU_DIR)/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc
 ZEPHYR_TOOLCHAIN_VARIANT ?= zephyr
 ZEPHYR_WEST_CONFIG := $(ZEPHYR_WORKSPACE)/.west/config
@@ -27,16 +36,22 @@ ZEPHYR_PATCHES := $(sort $(wildcard $(ZEPHYR_PATCH_DIR)/*.patch))
 # App build options
 PRISTINE ?= 0
 ZEPHYR_PRISTINE := $(if $(filter 1 yes true always,$(PRISTINE)),always,auto)
+# west's auto mode detects board/app changes, but doesn't detect SDK changes.
+zephyr-pristine = $(shell \
+	cached_sdk=$$(sed -n 's/^ZEPHYR_SDK_INSTALL_DIR:[^=]*=//p' "$(ZEPHYR_WORKSPACE)/$(1)/CMakeCache.txt" 2>/dev/null); \
+	if [ -n "$$cached_sdk" ] && [ "$$cached_sdk" != "$(ZEPHYR_SDK_SELECTED_DIR)" ]; then \
+		printf always; \
+	else printf '$(ZEPHYR_PRISTINE)'; fi)
 BLE ?= 1
 CDC_DIAG ?= 0
 .PRECIOUS: $(ZEPHYR_SDK_DOWNLOAD_DIR)/$(ZEPHYR_SDK_MINIMAL_ARCHIVE) $(ZEPHYR_SDK_DOWNLOAD_DIR)/$(ZEPHYR_SDK_ARM_ARCHIVE)
 # Don't pollute ~ with Zephyr's cache
 ZEPHYR_USER_CACHE_DIR ?= $(ZEPHYR_WORKSPACE)/zephyr-cache
-ZEPHYR_BUILD_ENV := \
+ZEPHYR_BUILD_ENV = \
 	CCACHE_DISABLE=1 \
-	XDG_CACHE_HOME=$(ZEPHYR_USER_CACHE_DIR) \
-	ZEPHYR_TOOLCHAIN_VARIANT=$(ZEPHYR_TOOLCHAIN_VARIANT) \
-	ZEPHYR_SDK_INSTALL_DIR=$(ZEPHYR_SDK_DIR)
+	XDG_CACHE_HOME="$(ZEPHYR_USER_CACHE_DIR)" \
+	ZEPHYR_TOOLCHAIN_VARIANT="$(ZEPHYR_TOOLCHAIN_VARIANT)" \
+	ZEPHYR_SDK_INSTALL_DIR="$(ZEPHYR_SDK_SELECTED_DIR)"
 # Boot stub
 BOOTSTUB_BUILD_DIR ?= $(CURDIR)/bootstub/build
 BOOTSTUB_APP_PAYLOAD ?= $(CURDIR)/IBEX_FW_69FE17FF.fw.payload.bin
@@ -144,14 +159,14 @@ test-valve-nvs: $(ZEPHYR_APP)/tests/valve_nvs.c
 	$(call host-test,--legacy-fixture "$(ZEPHYR_APP)/tests/fixtures/valve_nvs_3_7_99_wrap.bin",$(ZEPHYR_APP)/src/valve_nvs.c)
 
 .PHONY: test-haptics-stereo
-test-haptics-stereo: zephyr-workspace
-	cd "$(ZEPHYR_WORKSPACE)" && $(ZEPHYR_BUILD_ENV) $(WEST) build -p "$(ZEPHYR_PRISTINE)" \
+test-haptics-stereo: zephyr-workspace zephyr-sdk-arm
+	cd "$(ZEPHYR_WORKSPACE)" && $(ZEPHYR_BUILD_ENV) $(WEST) build -p "$(call zephyr-pristine,build-test-haptics-stereo)" \
 		-b native_sim "$(ZEPHYR_APP)/tests/haptics_stereo" -d build-test-haptics-stereo
 	"$(ZEPHYR_WORKSPACE)/build-test-haptics-stereo/zephyr/zephyr.exe"
 
 .PHONY: test-imu-threshold
-test-imu-threshold: zephyr-workspace
-	cd "$(ZEPHYR_WORKSPACE)" && $(ZEPHYR_BUILD_ENV) $(WEST) build -p "$(ZEPHYR_PRISTINE)" \
+test-imu-threshold: zephyr-workspace zephyr-sdk-arm
+	cd "$(ZEPHYR_WORKSPACE)" && $(ZEPHYR_BUILD_ENV) $(WEST) build -p "$(call zephyr-pristine,build-test-imu-threshold)" \
 		-b native_sim "$(ZEPHYR_APP)/tests/imu_threshold" -d build-test-imu-threshold
 	"$(ZEPHYR_WORKSPACE)/build-test-imu-threshold/zephyr/zephyr.exe"
 
@@ -373,11 +388,12 @@ zephyr-patches-update: $(ZEPHYR_WEST_UPDATE_STAMP)
 
 .PHONY: zephyr-sdk-arm
 zephyr-sdk-arm:
-	@if ! test -f "$(ZEPHYR_SDK_STAMP)" || \
-	   ! test -f "$(ZEPHYR_SDK_CMAKE_CONFIG)" || \
-	   ! test -x "$(ZEPHYR_SDK_ARM_GCC)"; then \
-		$(MAKE) zephyr-sdk-arm-install; \
+	@if [ "$(ZEPHYR_SDK_SELECTED_DIR)" = "$(ZEPHYR_SDK_LOCAL_DIR)" ] && \
+	   ! $(CMAKE) "-DSDK_ROOT=$(ZEPHYR_SDK_LOCAL_DIR)" -DSDK_REQUIRED=ON \
+		-P "$(CURDIR)/scripts/zephyr-sdk.cmake" >/dev/null 2>&1; then \
+		$(MAKE) zephyr-sdk-arm-install || exit $$?; \
 	fi
+	@$(CMAKE) "-DSDK_ROOT=$(ZEPHYR_SDK_SELECTED_DIR)" -DSDK_REQUIRED=ON -P "$(CURDIR)/scripts/zephyr-sdk.cmake"
 
 $(ZEPHYR_SDK_DOWNLOAD_DIR):
 	mkdir -p "$@"
@@ -414,21 +430,21 @@ zephyr-sdk-arm-install: \
 		rm -f "$(ZEPHYR_SDK_DOWNLOAD_DIR)/$(ZEPHYR_SDK_ARM_ARCHIVE)"; \
 		exit 1; \
 	fi
-	rm -rf "$(ZEPHYR_SDK_DIR)"
-	mkdir -p "$(dir $(ZEPHYR_SDK_DIR))"
+	rm -rf "$(ZEPHYR_SDK_LOCAL_DIR)"
+	mkdir -p "$(dir $(ZEPHYR_SDK_LOCAL_DIR))"
 	tar -xJf "$(ZEPHYR_SDK_DOWNLOAD_DIR)/$(ZEPHYR_SDK_MINIMAL_ARCHIVE)" \
-		-C "$(dir $(ZEPHYR_SDK_DIR))"
+		-C "$(dir $(ZEPHYR_SDK_LOCAL_DIR))"
 	test -f "$(ZEPHYR_SDK_CMAKE_CONFIG)"
 	mkdir -p "$(ZEPHYR_SDK_GNU_DIR)"
 	tar -xJf "$(ZEPHYR_SDK_DOWNLOAD_DIR)/$(ZEPHYR_SDK_ARM_ARCHIVE)" \
 		-C "$(ZEPHYR_SDK_GNU_DIR)"
-	test -x "$(ZEPHYR_SDK_GNU_DIR)/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc"
-	cd "$(ZEPHYR_SDK_DIR)" && ./setup.sh -h
+	test -x "$(ZEPHYR_SDK_ARM_GCC)"
+	cd "$(ZEPHYR_SDK_LOCAL_DIR)" && ./setup.sh -h
 	touch "$(ZEPHYR_SDK_STAMP)"
 
 .PHONY: app-microbit
 app-microbit: zephyr-workspace zephyr-sdk-arm sc26re-build-conf
-	cd "$(ZEPHYR_WORKSPACE)" && $(ZEPHYR_BUILD_ENV) $(WEST) build -p "$(ZEPHYR_PRISTINE)" \
+	cd "$(ZEPHYR_WORKSPACE)" && $(ZEPHYR_BUILD_ENV) $(WEST) build -p "$(call zephyr-pristine,$(ZEPHYR_APP_BUILD_PREFIX)-microbit)" \
 		-b bbc_microbit_v2 "$(ZEPHYR_APP)" -d "$(ZEPHYR_APP_BUILD_PREFIX)-microbit" \
 		-- -DBOARD_ROOT="$(ZEPHYR_APP)" -DEXTRA_CONF_FILE="$(MICROBIT_CONF_FILES)"
 
@@ -439,7 +455,7 @@ app-microbit-flash: app-microbit
 
 .PHONY: app-ibex
 app-ibex: zephyr-workspace zephyr-sdk-arm sc26re-build-conf
-	cd "$(ZEPHYR_WORKSPACE)" && $(ZEPHYR_BUILD_ENV) $(WEST) build -p "$(ZEPHYR_PRISTINE)" \
+	cd "$(ZEPHYR_WORKSPACE)" && $(ZEPHYR_BUILD_ENV) $(WEST) build -p "$(call zephyr-pristine,$(ZEPHYR_APP_BUILD_PREFIX)-ibex)" \
 		-b steam_controller_ibex/nrf52833 "$(ZEPHYR_APP)" -d "$(ZEPHYR_APP_BUILD_PREFIX)-ibex" \
 		-- -DBOARD_ROOT="$(ZEPHYR_APP)" -DEXTRA_CONF_FILE="$(IBEX_CONF_FILES)"
 
@@ -489,7 +505,7 @@ help:
 		'make format                         clang-format app C sources in place' \
 		'make format-check                   verify app C sources match app/.clang-format' \
 		'make test                           run host-side unit tests' \
-		'make zephyr-sdk-arm                 install pinned Zephyr SDK metadata and ARM toolchain under sdk/' \
+		'make zephyr-sdk-arm-install         install Zephyr SDK 1.0.1 under sdk/' \
 		'' \
 		'Firmware/source fetching:' \
 		'make firmware                       fetch Steam client hardware packages, copy firmware, verify sums' \

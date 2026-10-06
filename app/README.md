@@ -37,12 +37,28 @@ Development target using Zephyr's in-tree BBC micro:bit v2 board, plus a small a
 
 ## Building
 
-The repository pins upstream Zephyr 4.4.1 and Zephyr SDK `1.0.1`.
+The repository uses upstream Zephyr 4.4.1. If you don't have a
+compatible version of the Zephyr SDK installed (discoverable by
+CMake), it will be downloaded automatically under `sdk/`.
 
-Install the ARM SDK subset:
+If no usable installed SDK is found, Make downloads SDK `1.0.1`
+into `sdk/`, so no separate SDK installation is required on Linux x86-64.
+Other hosts need a compatible installed SDK.
+To install the SDK before building:
 
 ```sh
-make zephyr-sdk-arm
+make zephyr-sdk-arm-install
+```
+
+To select an SDK explicitly, set Zephyr's standard `ZEPHYR_SDK_INSTALL_DIR`
+environment variable or pass `ZEPHYR_SDK_DIR` to Make. `ZEPHYR_SDK_DIR` takes
+precedence if both are set. Either may name an SDK directory or a directory
+containing multiple SDKs:
+
+```sh
+make app-ibex ZEPHYR_SDK_DIR=/opt/zephyr-sdk-1.0.1
+# Alternatively:
+ZEPHYR_SDK_INSTALL_DIR=/opt/zephyr-sdk-1.0.1 make app-ibex
 ```
 
 Build the micro:bit target:
